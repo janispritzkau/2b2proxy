@@ -1,0 +1,257 @@
+@font-face {
+  font-family: "Minecraft";
+  font-style: normal;
+  font-weight: 400;
+  src:
+    local("Minecraft"),
+    url("./assets/fonts/minecraft.woff") format("woff");
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  outline: 0;
+}
+
+:root {
+  --background: #fff;
+  --background-darker: #f6f6f6;
+  --contrast: rgba(0, 0, 0, 0.75);
+  --contrast-0: rgba(0, 0, 0, 0.4);
+  --contrast-1: rgba(0, 0, 0, 0.16);
+  --contrast-2: rgba(0, 0, 0, 0.1);
+  --contrast-3: rgba(0, 0, 0, 0.07);
+  --primary: #00a08d;
+  --primary-active: #008f7e;
+  --secondary: #db345e;
+  --secondary-active: #c92d54;
+}
+
+:root.dark {
+  --background: #31343b;
+  --background-darker: #282a31;
+  --contrast: rgba(251, 252, 255, 0.85);
+  --contrast-0: rgba(251, 252, 255, 0.36);
+  --contrast-1: rgba(248, 250, 255, 0.16);
+  --contrast-2: rgba(245, 248, 255, 0.1);
+  --contrast-3: rgba(240, 243, 255, 0.05);
+}
+
+body {
+  font-family: "Roboto", sans-serif;
+  color: var(--contrast);
+  background: var(--background-darker);
+  overflow: hidden;
+}
+
+p {
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.button {
+  border: none;
+  background: none;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  color: var(--contrast);
+  user-select: none;
+  cursor: pointer;
+  margin: 0;
+  outline: 0 !important;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 14px;
+  font-weight: 500;
+  text-transform: uppercase;
+  border-radius: 3px;
+  transition: background 0.1s, opacity 0.2s;
+}
+
+.button.primary {
+  color: var(--primary);
+}
+
+.button.secondary {
+  color: var(--secondary);
+}
+
+.button:not(:disabled):hover {
+  background: var(--contrast-2);
+}
+
+.button:not(:disabled):active, .button.active {
+  background: var(--contrast-1);
+}
+
+.button.raised {
+  color: #fff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+}
+
+.button.raised.primary {
+  background: var(--primary);
+}
+
+.button.raised.primary:active {
+  background: var(--primary-active);
+}
+
+.button.raised.secondary {
+  background: var(--secondary);
+}
+
+.button.raised.secondary:active {
+  background: var(--secondary-active);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.icon-button {
+  border: none;
+  background: none;
+  display: inline-flex;
+  padding: 8px;
+  color: inherit;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+
+.icon-button:active {
+  background: var(--contrast-2);
+}
+
+.label {
+  display: block;
+  font-size: 15px;
+  margin: 16px 0 8px;
+}
+
+.input {
+  width: 100%;
+  padding: 8px;
+  color: inherit;
+  border: none;
+  border-radius: 3px;
+  border: 2px solid var(--contrast-1);
+  box-sizing: border-box;
+  background: var(--background);
+  transition: border 0.1s, opacity 0.2s;
+}
+
+.input:focus {
+  border-color: var(--primary);
+}
+
+.input.invalid {
+  border-color: #f72738;
+}
+
+.input:disabled {
+  opacity: 0.7;
+}
+
+.input:-webkit-autofill {
+  animation: autofill 0s forwards;
+}
+
+@keyframes autofill {
+  100% {
+    background: var(--contrast-3);
+    color: inherit;
+    font: inherit;
+  }
+}
+
+.tabs {
+  display: flex;
+  overflow-x: auto;
+}
+
+.tabs::before,
+.tabs::after {
+  content: "";
+  flex-grow: 3;
+}
+
+.tab {
+  flex-grow: 1;
+  flex-basis: 80px;
+  white-space: nowrap;
+  padding: 14px 16px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  text-transform: uppercase;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+  border-bottom: 2px solid transparent;
+  opacity: 0.7;
+}
+
+.tab:active {
+  background: var(--contrast-2);
+}
+
+.tab.selected {
+  border-color: var(--secondary);
+  opacity: 1;
+}
+
+.list {
+  padding: 16px 0;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  min-height: 26px;
+  padding: 8px 16px;
+  transition: background 0.2s;
+  user-select: none;
+  outline: 0;
+}
+
+.item img {
+  width: 40px;
+  border-radius: 50%;
+  margin-right: 16px;
+}
+
+.item span {
+  flex-grow: 1;
+}
+
+.item:hover {
+  background: var(--contrast-3);
+}
+
+.item:active,
+.item.selected {
+  background: var(--contrast-2);
+}
+
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.2s;
+}
+
+.fade-enter, .fade-leave-to {
+  opacity: 0;
+}
+
+.material-icons {
+  user-select: none;
+  width: 1em;
+  vertical-align: middle;
+}

@@ -136,11 +136,11 @@ export class Connection {
     this.client.end()
   }
 
-  async proxy(conn: ServerConnection, eid: number, respawn = false) {
+  async proxy(conn: ServerConnection, eid = this.eid, respawn = false) {
     if (this.conn) throw new Error("Already proxied")
     reactive(this).conn = conn
 
-    for (const packet of this.getPackets(respawn)) {
+    for (const packet of this.getPackets(respawn, eid)) {
       await conn.send(this.mapClientboundPacket(packet, eid))
     }
 
@@ -169,7 +169,7 @@ export class Connection {
       const position = packet.readUInt8()
       if (position != 0 && position != 1) return
 
-      if (this.queue && chat.format(message, { }).includes("Connecting to the server")) {
+      if (this.queue && chat.format(message).includes("Connecting to the server")) {
         this.queue = null
       }
 
@@ -665,7 +665,7 @@ export class Connection {
     // TODO: 0x4f entity effect
   }
 
-  private getPackets(respawn = false) {
+  private getPackets(respawn = false, eid: number) {
     const packets: Packet[] = []
     let packet: PacketWriter
 
@@ -675,7 +675,7 @@ export class Connection {
         .writeUInt8(this.difficulty).writeUInt8(this.gamemode & 0x7).writeString(this.levelType))
     } else {
       // join game
-      packets.push(new PacketWriter(0x23).writeInt32(this.eid)
+      packets.push(new PacketWriter(0x23).writeInt32(eid)
         .writeUInt8(this.gamemode).writeInt32(this.dimension).writeUInt8(this.difficulty)
         .writeUInt8(0).writeString(this.levelType).writeBool(false))
     }
@@ -827,7 +827,7 @@ export class Connection {
       const entityEid = packet.readVarInt()
       const writer = new PacketWriter(packet.id)
         .writeVarInt(entityEid == this.eid ? clientEid : entityEid)
-      const objectType = this.objects.get(this.eid)
+      const objectType = this.objects.get(entityEid)
       if (objectType == 76) while (true) {
         const index = packet.readUInt8()
         writer.writeUInt8(index)

@@ -20,11 +20,10 @@ export function createServer(connections: Map<string, Connection>) {
 
     const username = (await conn.nextPacket(0x0)).readString()
 
-    // await conn.encrypt(username, true)
+    await conn.encrypt(username, true)
     conn.setCompression(256)
 
     const uuid = "00000000-0000-0000-0000-000000000000"
-    const eid = 999
 
     conn.send(new PacketWriter(0x2)
       .writeString(uuid)
@@ -32,19 +31,11 @@ export function createServer(connections: Map<string, Connection>) {
 
     for (const connection of connections.values()) {
       if (connection.conn) return conn.end()
-      connection.proxy(conn, eid)
-      break
+      connection.proxy(conn)
+      return
     }
 
-    // const profile = [...data.profiles.values()].find(p => p.name == username)
-
-    // if (!profile) return conn.end(new PacketWriter(0x0).writeJSON({
-    //     text: "You need to connect via one of your profiles"
-    // }))
-
-    // const uuid = "00000000-0000-0000-0000-000000000000"
-    // const eid = 999
-
+    conn.end()
   })
 
   return server

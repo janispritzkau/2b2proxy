@@ -188,7 +188,7 @@ export class Connection {
     }
 
     const serverboundListener = conn.on("packet", packet => {
-      if (packet.offset != 0 || packet.id == 0x0 || packet.id == 0xb) return
+      if (packet.id == 0x0 || packet.id == 0xb) return
       this.client.send(this.mapServerboundPacket(packet, eid))
     })
 
@@ -716,6 +716,8 @@ export class Connection {
 
     if (respawn) {
       // respawn
+      packets.push(new PacketWriter(0x35).writeInt32(this.dimension == 1 ? 0 : 1)
+        .writeUInt8(0).writeUInt8(3).writeString(""))
       packets.push(new PacketWriter(0x35).writeInt32(this.dimension)
         .writeUInt8(this.difficulty).writeUInt8(this.gamemode & 0x7).writeString(this.levelType))
     } else {
@@ -723,19 +725,6 @@ export class Connection {
       packets.push(new PacketWriter(0x23).writeInt32(eid)
         .writeUInt8(this.gamemode).writeInt32(this.dimension).writeUInt8(this.difficulty)
         .writeUInt8(0).writeString(this.levelType).writeBool(false))
-    }
-
-    // player position and look
-    packets.push(new PacketWriter(0x2f)
-      .writeDouble(this.player.x).writeDouble(this.player.y).writeDouble(this.player.z)
-      .writeFloat(this.player.yaw).writeFloat(this.player.pitch).writeUInt8(0)
-      .writeVarInt(0))
-
-    // chunk data
-    for (const chunks of this.chunks.values()) {
-      for (const chunk of chunks.values()) {
-        packets.push(...chunk)
-      }
     }
 
     // player list item
@@ -790,6 +779,19 @@ export class Connection {
     if (this.raining) packets.push(new PacketWriter(0x1e).writeUInt8(2).writeFloat(0))
     if (this.fadeValue != 0) packets.push(new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeValue))
     if (this.fadeTime != 0) packets.push(new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeTime))
+
+    // player position and look
+    packets.push(new PacketWriter(0x2f)
+      .writeDouble(this.player.x).writeDouble(this.player.y).writeDouble(this.player.z)
+      .writeFloat(this.player.yaw).writeFloat(this.player.pitch).writeUInt8(0)
+      .writeVarInt(0))
+
+    // chunk data
+    for (const chunks of this.chunks.values()) {
+      for (const chunk of chunks.values()) {
+        packets.push(...chunk)
+      }
+    }
 
     for (const [eid, entity] of this.entities) {
       const spawn = entity.spawn.clone()

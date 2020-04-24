@@ -1,4 +1,4 @@
-import { Client, PacketReader, PacketWriter, Packet, ServerConnection, State, nbt } from "mcproto"
+import { Client, PacketReader, PacketWriter, Packet, ServerConnection, State, nbt, Position } from "mcproto"
 import { reactive, markRaw } from "@vue/reactivity"
 import * as chat from "mc-chat-format"
 import { validateOrRefreshToken } from "./utils"
@@ -34,7 +34,7 @@ export interface BossBar {
 export interface MapData {
   scale: number
   showIcons: boolean
-  icons: Buffer[]
+  icons: { type: number, direction: number, x: number, y: number }[]
   data: number[]
 }
 
@@ -45,21 +45,42 @@ export interface Item {
   tag: nbt.Tag | null
 }
 
+export interface MetadataEntry {
+  type: number
+  value: any
+}
+
+export interface EntityProperty {
+  value: number
+  modifiers: { uuid: string, amount: number, operation: number }[]
+}
+
+export type Metadata = Map<number, MetadataEntry>
+export type EntityProperties = Map<string, EntityProperty>
+
 export interface Entity {
   type: "object" | "orb" | "global" | "mob" | "painting" | "player"
-  spawn: PacketReader
-  passengers?: number[]
-  properties?: Map<string, Buffer>
-  metadata?: Map<number, Buffer>
-  x?: number
-  y?: number
-  z?: number
+  eid: number
+  uuid?: string
+  objectType?: number
+  objectData?: number
+  orbCount?: number
+  globalEntityType?: number
+  mobType?: number
+  paintingTitle?: string
+  paintingDirection?: number
+  x: number
+  y: number
+  z: number
+  pitch?: number
+  yaw?: number
+  headPitch?: number
   vx?: number
   vy?: number
   vz?: number
-  yaw?: number
-  pitch?: number
-  headPitch?: number
+  properties?: EntityProperties
+  metadata?: Metadata
+  passengers?: number[]
 }
 
 export interface Player {
@@ -128,7 +149,6 @@ export class Connection {
 
   chunks = new Map<number, Map<number, Chunk>>()
   entities = new Map<number, Entity>()
-  objects = new Map<number, number>()
 
   eid = -1
   gamemode = 0
@@ -136,19 +156,34 @@ export class Connection {
   difficulty = 0
   levelType = "default"
 
-  health?: PacketReader
-  xp?: PacketReader
-  tab?: PacketReader
-  playerAbilities?: PacketReader
-  time?: PacketReader
-  spawn?: PacketReader
+  health = 20
+  food = 20
+  saturation = 5
+
+  xpBar = 0
+  level = 0
+  totalXp = 0
+
+  playerListHeader?: chat.Component
+  playerListFooter?: chat.Component
+
+  invulnerable = false
+  flying = false
+  allowFlying = false
+  creativeMode = false
+  flyingSpeed = 0.05
+  fov = 0.1
+
+  worldAge = BigInt(0)
+  time = BigInt(0)
+  spawnPosition: Position = { x: 0, y: 0, z: 0 }
 
   heldItem = 0
   raining = false
   fadeValue = 0
   fadeTime = 0
 
-  riding: number | null = null
+  ridingEid: number | null = null
 
   // Connection related properties
   conn: ServerConnection | null = null
@@ -246,13 +281,12 @@ export class Connection {
     // spawn object
     this.client.onPacket(0x0, packet => {
       const eid = packet.readVarInt()
-      packet.offset += 16
-      this.objects.set(eid, packet.readInt8())
       this.entities.set(eid, {
-        type: "object", x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
-        yaw: packet.readInt8(), pitch: packet.readInt8(),
-        vx: (packet.offset += 4, packet.readInt16()), vy: packet.readInt16(), vz: packet.readInt16(),
-        spawn: packet
+        type: "object", eid, uuid: packet.read(16).toString("hex"), objectType: packet.readInt8(),
+        x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
+        pitch: packet.readInt8(), yaw: packet.readInt8(),
+        objectData: packet.readInt32(),
+        vx: packet.readInt16(), vy: packet.readInt16(), vz: packet.readInt16()
       })
     })
 
@@ -260,38 +294,34 @@ export class Connection {
     this.client.onPacket(0x1, packet => {
       const eid = packet.readVarInt()
       this.entities.set(eid, {
-        type: "orb", x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
-        spawn: packet
-      })
-    })
-
-    // spawn global entity
-    this.client.onPacket(0x2, packet => {
-      const eid = packet.readVarInt()
-      packet.offset += 1
-      this.entities.set(eid, {
-        type: "global", x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
-        spawn: packet
+        type: "orb", eid,
+        x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
+        orbCount: packet.readInt16()
       })
     })
 
     // spawn mob
     this.client.onPacket(0x3, packet => {
       const eid = packet.readVarInt()
-      packet.offset += 16, packet.readVarInt()
       this.entities.set(eid, {
-        type: "mob", x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
+        type: "mob", eid, uuid: packet.read(16).toString("hex"), mobType: packet.readVarInt(),
+        x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
         yaw: packet.readInt8(), pitch: packet.readInt8(), headPitch: packet.readInt8(),
         vx: packet.readInt16(), vy: packet.readInt16(), vz: packet.readInt16(),
-        spawn: packet
+        metadata: readMetadata(packet)
       })
     })
 
     // spawn painting
     this.client.onPacket(0x4, packet => {
       const eid = packet.readVarInt()
-      packet.offset += 16, packet.readVarInt()
-      this.entities.set(eid, { type: "painting", spawn: packet })
+      this.entities.set(eid, {
+        type: "painting", eid,
+        uuid: packet.read(16).toString("hex"),
+        paintingTitle: packet.readString(),
+        ...packet.readPosition(),
+        paintingDirection: packet.readInt8()
+      })
     })
 
     // spawn player
@@ -299,9 +329,10 @@ export class Connection {
       const eid = packet.readVarInt()
       packet.offset += 16
       this.entities.set(eid, {
-        type: "player", x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
+        type: "player", eid,
+        x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
         yaw: packet.readInt8(), pitch: packet.readInt8(),
-        spawn: packet
+        metadata: readMetadata(packet)
       })
     })
 
@@ -361,11 +392,8 @@ export class Connection {
       const count = packet.readUInt16()
       for (let i = 0; i < count; i++) {
         const id = packet.readInt16()
-        if (id == -1) {
-          this.inventory.delete(i)
-          continue
-        }
-        this.inventory.set(i, {
+        if (id == -1) this.inventory.delete(i)
+        else this.inventory.set(i, {
           id, count: packet.readInt8(), damage: packet.readInt16(),
           tag: packet.readNBT()?.value
         })
@@ -377,8 +405,8 @@ export class Connection {
       if (packet.readInt8() != 0) return
       const slot = packet.readInt16()
       const id = packet.readInt16()
-      if (id == -1) return this.inventory.delete(slot)
-      this.inventory.set(slot, {
+      if (id == -1) this.inventory.delete(slot)
+      else this.inventory.set(slot, {
         id, count: packet.readInt8(), damage: packet.readInt16(),
         tag: packet.readNBT()?.value
       })
@@ -443,7 +471,13 @@ export class Connection {
       const id = packet.readVarInt()
       const scale = packet.readUInt8()
       const showIcons = packet.readBool()
-      const icons = [...Array(packet.readVarInt())].map(() => packet.read(3))
+      const icons = [...Array(packet.readVarInt())].map(() => {
+        const value = packet.readUInt8()
+        return {
+          type: (value & 0xf0) >> 4, direction: value & 0xf,
+          x: packet.readUInt8(), y: packet.readUInt8()
+        }
+      })
       if (!this.maps.has(id)) {
         this.maps.set(id, { scale, showIcons, icons, data: Array(16384).fill(0) })
       }
@@ -486,13 +520,21 @@ export class Connection {
     // vehicle move
     this.client.onPacket(0x29, packet => {
       const x = packet.readDouble(), y = packet.readDouble(), z = packet.readDouble()
-      const entity = this.entities.get(this.riding!)
+      const entity = this.entities.get(this.ridingEid!)
       if (entity) entity.x = x, entity.y = y, entity.z = z
       this.player.x = x, this.player.y = y, this.player.z = z
     })
 
     // player abilities
-    this.client.onPacket(0x2c, packet => this.playerAbilities = packet)
+    this.client.onPacket(0x2c, packet => {
+      const flags = packet.readUInt8()
+      this.flyingSpeed = packet.readFloat()
+      this.fov = packet.readFloat()
+      this.invulnerable = Boolean(flags & 0x1)
+      this.flying = Boolean(flags & 0x2)
+      this.allowFlying = Boolean(flags & 0x4)
+      this.creativeMode = Boolean(flags & 0x8)
+    })
 
     // player list item
     this.client.onPacket(0x2e, packet => {
@@ -541,9 +583,7 @@ export class Connection {
     // destroy entities
     this.client.onPacket(0x32, packet => {
       for (let i = packet.readVarInt(); i--;) {
-        const eid = packet.readVarInt()
-        this.entities.delete(eid)
-        this.objects.delete(eid)
+        this.entities.delete(packet.readVarInt())
       }
     })
 
@@ -579,24 +619,8 @@ export class Connection {
       const entity = this.entities.get(packet.readVarInt())
       if (!entity) return
       if (!entity.metadata) entity.metadata = new Map()
-      while (true) {
-        const index = packet.readUInt8()
-        if (index == 0xff) break
-        const start = packet.offset
-        const type = packet.readVarInt()
-        switch (type) {
-          case 0: case 6: packet.offset += 1; break
-          case 1: case 10: case 12: packet.readVarInt(); break
-          case 2: packet.offset += 4; break
-          case 3: case 4: packet.readString(); break
-          case 5: if (packet.readInt16() != -1) packet.offset += 3, packet.readNBT(); break
-          case 7: packet.offset += 12; break
-          case 8: packet.offset += 8; break
-          case 9: if (packet.readBool()) packet.offset += 8; break
-          case 11: if (packet.readBool()) packet.offset += 16; break
-          case 13: packet.readNBT(); break
-        }
-        entity.metadata.set(index, packet.buffer.slice(start, packet.offset))
+      for (const [index, entry] of readMetadata(packet)) {
+        entity.metadata.set(index, entry)
       }
     })
 
@@ -614,10 +638,18 @@ export class Connection {
     // TODO: 0x3f entity equipment
 
     // set experience
-    this.client.onPacket(0x40, packet => this.xp = packet)
+    this.client.onPacket(0x40, packet => {
+      this.xpBar = packet.readFloat()
+      this.level = packet.readVarInt()
+      this.totalXp = packet.readVarInt()
+    })
 
     // update health
-    this.client.onPacket(0x41, packet => this.health = packet)
+    this.client.onPacket(0x41, packet => {
+      this.health = packet.readFloat()
+      this.food = packet.readVarInt()
+      this.saturation = packet.readFloat()
+    })
 
     // TODO: 0x42 scoreboard objective
 
@@ -626,12 +658,13 @@ export class Connection {
       const eid = packet.readVarInt()
       const entity = this.entities.get(eid)
       if (!entity) return
-      if (this.riding == eid) this.riding = null
-      entity.passengers = [...Array(packet.readVarInt())].map(() => {
+      if (this.ridingEid == eid) this.ridingEid = null
+      entity.passengers = []
+      for (let i = packet.readVarInt(); i--;) {
         const passengerEid = packet.readVarInt()
-        if (passengerEid == this.eid) this.riding = this.eid
-        return passengerEid
-      })
+        if (passengerEid == this.eid) this.ridingEid = this.eid
+        entity.passengers.push(passengerEid)
+      }
     })
 
     // teams
@@ -670,15 +703,21 @@ export class Connection {
     // TODO: 0x45 update score
 
     // spawn position
-    this.client.onPacket(0x46, packet => this.spawn = packet)
+    this.client.onPacket(0x46, packet => this.spawnPosition = packet.readPosition())
 
     // time update
-    this.client.onPacket(0x47, packet => this.time = packet)
+    this.client.onPacket(0x47, packet => {
+      this.worldAge = packet.readUInt64()
+      this.time = packet.readUInt64()
+    })
 
     // TODO: 0x48 title
 
     // player list header and footer
-    this.client.onPacket(0x4a, packet => this.tab = packet)
+    this.client.onPacket(0x4a, packet => {
+      this.playerListHeader = packet.readJSON()
+      this.playerListFooter = packet.readJSON()
+    })
 
     // entity teleport
     this.client.onPacket(0x4c, packet => {
@@ -700,10 +739,14 @@ export class Connection {
       if (!entity.properties) entity.properties = new Map()
       for (let i = packet.readUInt32(); i--;) {
         const key = packet.readString()
-        const start = packet.offset
-        packet.offset += 8
-        for (let j = packet.readVarInt(); j--;) packet.offset += 25
-        entity.properties.set(key, packet.buffer.slice(start, packet.offset))
+        const value = packet.readDouble()
+        const modifiers: EntityProperty["modifiers"] = []
+        for (let j = packet.readVarInt(); j--;) modifiers.push({
+          uuid: packet.read(16).toString("hex"),
+          amount: packet.readDouble(),
+          operation: packet.readInt8()
+        })
+        entity.properties.set(key, { value, modifiers })
       }
     })
 
@@ -768,17 +811,24 @@ export class Connection {
     }
     packets.push(packet)
 
-    if (this.heldItem != 0) packets.push(new PacketWriter(0x3a).writeInt8(this.heldItem))
-    if (this.playerAbilities) packets.push(this.playerAbilities)
-    if (this.health) packets.push(this.health)
-    if (this.xp) packets.push(this.xp)
-    if (this.tab) packets.push(this.tab)
-    if (this.time) packets.push(this.time)
-    if (this.spawn) packets.push(this.spawn)
+    packets.push(new PacketWriter(0x3a).writeInt8(this.heldItem))
+
+    packets.push(new PacketWriter(0x2c)
+      .writeUInt8(+this.invulnerable | +this.flying << 1 | +this.allowFlying << 2 | +this.creativeMode << 3)
+      .writeFloat(this.flyingSpeed).writeFloat(this.fov))
+
+    packets.push(new PacketWriter(0x40).writeFloat(this.xpBar).writeVarInt(this.level).writeVarInt(this.totalXp))
+    packets.push(new PacketWriter(0x41).writeFloat(this.health).writeVarInt(this.food).writeFloat(this.saturation))
+
+    if (this.playerListHeader) packets.push(new PacketWriter(0x4a)
+      .writeJSON(this.playerListHeader).writeJSON(this.playerListFooter))
+
+    packets.push(new PacketWriter(0x46).writePosition(this.spawnPosition))
+    packets.push(new PacketWriter(0x47).writeUInt64(this.worldAge).writeUInt64(this.time))
 
     if (this.raining) packets.push(new PacketWriter(0x1e).writeUInt8(2).writeFloat(0))
     if (this.fadeValue != 0) packets.push(new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeValue))
-    if (this.fadeTime != 0) packets.push(new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeTime))
+    if (this.fadeTime != 0) packets.push(new PacketWriter(0x1e).writeUInt8(8).writeFloat(this.fadeTime))
 
     // player position and look
     packets.push(new PacketWriter(0x2f)
@@ -794,65 +844,68 @@ export class Connection {
     }
 
     for (const [eid, entity] of this.entities) {
-      const spawn = entity.spawn.clone()
-
       if (entity.type == "object") {
         packets.push(new PacketWriter(0x0)
-          .writeVarInt(spawn.readVarInt())
-          .write(spawn.read(17))
-          .writeDouble(entity.x!).writeDouble(entity.y!).writeDouble(entity.z!)
-          .writeInt8(entity.yaw!).writeInt8(entity.pitch!)
-          .writeInt32((spawn.read(26), spawn.readInt32()))
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeInt8(entity.objectType!)
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
+          .writeInt8(entity.pitch!).writeInt8(entity.yaw!)
+          .writeInt32(entity.objectData!)
           .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!))
       } else if (entity.type == "orb") {
-        packets.push(new PacketWriter(0x1).writeVarInt(spawn.readVarInt())
-          .writeDouble(entity.x!).writeDouble(entity.y!).writeDouble(entity.z!)
-          .writeInt16((spawn.read(24), spawn.readUInt16())))
+        packets.push(new PacketWriter(0x1)
+          .writeVarInt(eid)
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
+          .writeInt16(entity.orbCount!))
       } else if (entity.type == "mob") {
         packet = new PacketWriter(0x3)
-          .writeVarInt(spawn.readVarInt())
-          .write(spawn.read(16))
-          .writeVarInt(spawn.readVarInt())
-          .writeDouble(entity.x!).writeDouble(entity.y!).writeDouble(entity.z!)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeVarInt(entity.mobType!)
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
           .writeInt8(entity.yaw!).writeInt8(entity.pitch!).writeInt8(entity.headPitch!)
           .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
-        for (const [index, buffer] of entity.metadata!) packet.writeUInt8(index).write(buffer)
-        packets.push(packet.writeUInt8(0xff))
+        packets.push(writeMetadata(packet, entity.metadata!))
+      } else if (entity.type == "painting") {
+        packets.push(new PacketWriter(0x4)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
+          .writeString(entity.paintingTitle!)
+          .writePosition(entity.x, entity.y, entity.z)
+          .writeVarInt(entity.paintingDirection!))
       } else if (entity.type == "player") {
         packet = new PacketWriter(0x5)
-          .writeVarInt(spawn.readVarInt())
-          .write(spawn.read(16))
-          .writeDouble(entity.x!).writeDouble(entity.y!).writeDouble(entity.z!)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
           .writeInt8(entity.yaw!).writeInt8(entity.pitch!)
-        for (const [index, buffer] of entity.metadata!) packet.writeUInt8(index).write(buffer)
-        packets.push(packet.writeUInt8(0xff))
-      } else {
-        packets.push(spawn)
+        packets.push(writeMetadata(packet, entity.metadata!))
       }
 
       if (entity.metadata && entity.type != "mob" && entity.type != "player") {
-        packet = new PacketWriter(0x3c).writeVarInt(eid)
-        for (const [index, buffer] of entity.metadata!) packet.writeUInt8(index).write(buffer)
-        packets.push(packet.writeUInt8(0xff))
+        packets.push(writeMetadata(new PacketWriter(0x3c).writeVarInt(eid), entity.metadata))
       }
 
       if (entity.properties) {
         packet = new PacketWriter(0x4e).writeVarInt(eid).writeUInt32(entity.properties.size)
-        for (const [key, buffer] of entity.properties) packet.writeString(key).write(buffer)
+        for (const [key, property] of entity.properties) {
+          packet.writeString(key).writeDouble(property.value).writeVarInt(property.modifiers.length)
+          for (const modifier of property.modifiers) packet.write(Buffer.from(modifier.uuid, "hex"))
+            .writeDouble(modifier.amount).writeInt8(modifier.operation)
+        }
         packets.push(packet)
       }
     }
 
-    for (const [eid, entity] of this.entities) if (entity.passengers) {
-      packet = new PacketWriter(0x43).writeVarInt(eid).writeVarInt(entity.passengers.length)
-      for (const eid of entity.passengers) packet.writeVarInt(eid)
-      packets.push(packet)
+    for (const [eid, entity] of this.entities) {
+      if (entity.passengers) {
+        packet = new PacketWriter(0x43).writeVarInt(eid).writeVarInt(entity.passengers.length)
+        for (const eid of entity.passengers) packet.writeVarInt(eid)
+        packets.push(packet)
+      }
     }
 
     for (const [id, map] of this.maps) {
       packet = new PacketWriter(0x24).writeVarInt(id).writeUInt8(map.scale)
       packet.writeBool(map.showIcons).writeVarInt(map.icons.length)
-      for (const buf of map.icons) packet.write(buf)
+      for (const icon of map.icons) packet
+        .writeUInt8(icon.type << 4 | icon.direction)
+        .writeUInt8(icon.x).writeUInt8(icon.y)
       packet.writeUInt8(128).writeUInt8(128).writeUInt8(0).writeUInt8(0)
       packet.writeVarInt(16384).write(Buffer.from(map.data))
       packets.push(packet)
@@ -872,38 +925,20 @@ export class Connection {
     } else if (packet.id == 0x3c) {
       // entity metadata
       const entityEid = packet.readVarInt()
+      const entity = this.entities.get(entityEid)
+      if (!entity || entity.objectType != 76) return packet
+
+      const metadata = readMetadata(packet)
+      metadata.forEach((entry, index) => {
+        if (entity.objectType == 76 && index == 7 && entry.type == 1) {
+          // entity which has used fireworks
+          entry.value = entry.value == this.eid ? clientEid : entry.value
+        }
+      })
+
       const writer = new PacketWriter(packet.id)
         .writeVarInt(entityEid == this.eid ? clientEid : entityEid)
-      const objectType = this.objects.get(entityEid)
-      if (objectType == 76) while (true) {
-        const index = packet.readUInt8()
-        writer.writeUInt8(index)
-        if (index == 0xff) break
-        const type = packet.readVarInt()
-        writer.writeVarInt(type)
-        const start = packet.offset
-        if (objectType == 76 && index == 7 && type == 1) {
-          // entity which has used fireworks
-          const eid = packet.readVarInt()
-          writer.writeVarInt(eid == this.eid ? clientEid : eid)
-          break
-        }
-        switch (type) {
-          case 0: case 6: packet.offset += 1; break
-          case 1: case 10: case 12: packet.readVarInt(); break
-          case 2: packet.offset += 4; break
-          case 3: case 4: packet.readString(); break
-          case 5: packet.readInt16() != -1 && (packet.offset += 3, packet.readNBT()); break
-          case 7: packet.offset += 12; break
-          case 8: packet.offset += 8; break
-          case 9: if (packet.readBool()) packet.offset += 8; break
-          case 11: if (packet.readBool()) packet.offset += 16; break
-          case 13: packet.readNBT(); break
-        }
-        writer.write(packet.buffer.slice(start, packet.offset))
-      }
-
-      return writer.write(packet.buffer.slice(packet.offset))
+      return writeMetadata(writer, metadata)
     } else if (packet.id == 0x1b) {
       // entity status
       const eid = packet.readInt32()
@@ -941,7 +976,7 @@ export class Connection {
     } else if (packet.id == 0x10) {
       // vehicle move
       const x = packet.readDouble(), y = packet.readDouble(), z = packet.readDouble()
-      const entity = this.entities.get(this.riding!)
+      const entity = this.entities.get(this.ridingEid!)
       if (entity) entity.x = x, entity.y = y, entity.z = z
       this.player.x = x, this.player.y = y, this.player.z = z
     } else if (packet.id == 0x15) {
@@ -975,4 +1010,71 @@ export class Connection {
     if (!chunks) return (this.chunks.set(x, new Map([[z, chunk]])), chunk)
     return (chunks.set(z, chunk), chunk)
   }
+}
+
+function readMetadata(packet: PacketReader): Metadata {
+  const metadata = new Map<number, MetadataEntry>()
+  while (true) {
+    const index = packet.readInt8()
+    if (index == -1) break
+    const type = packet.readVarInt()
+    switch (type) {
+      case 0: metadata.set(index, { type, value: packet.readInt8() }); break
+      case 1: metadata.set(index, { type, value: packet.readVarInt() }); break
+      case 2: metadata.set(index, { type, value: packet.readFloat() }); break
+      case 3: metadata.set(index, { type, value: packet.readString() }); break
+      case 4: metadata.set(index, { type, value: packet.readJSON() }); break
+      case 5: {
+        const id = packet.readInt16()
+        metadata.set(index, {
+          type, value: id != -1
+            ? { id, count: packet.readInt8(), damage: packet.readInt16(), nbt: packet.readNBT()?.value }
+            : null
+        })
+      }; break
+      case 6: metadata.set(index, { type, value: packet.readBool() }); break
+      case 7: metadata.set(index, {
+        type, value: {
+          x: packet.readFloat(), y: packet.readFloat(), z: packet.readFloat()
+        }
+      }); break
+      case 8: metadata.set(index, { type, value: packet.readPosition() }); break
+      case 9: metadata.set(index, { type, value: packet.readBool() ? packet.readPosition() : null }); break
+      case 10: metadata.set(index, { type, value: packet.readVarInt() }); break
+      case 11: metadata.set(index, { type, value: packet.readBool() ? packet.read(16) : null }); break
+      case 12: metadata.set(index, { type, value: packet.readVarInt() }); break
+      case 13: metadata.set(index, { type, value: packet.readNBT()?.value! }); break
+      default: throw new Error(`Unexpected metadata type '${type}'`)
+    }
+  }
+  return metadata
+}
+
+function writeMetadata(packet: PacketWriter, metadata: Metadata) {
+  for (const [index, { type, value }] of metadata) {
+    packet.writeUInt8(index)
+    packet.writeVarInt(type)
+    switch (type) {
+      case 0: packet.writeInt8(value); break
+      case 1: packet.writeVarInt(value); break
+      case 2: packet.writeFloat(value); break
+      case 3: packet.writeString(value); break
+      case 4: packet.writeJSON(value); break
+      case 5: {
+        if (!value) { packet.writeInt16(-1); break }
+        packet.writeInt16(value.id).writeInt8(value.count).writeInt16(value.damage)
+        packet.writeNBT("", value.nbt)
+      }; break
+      case 6: packet.writeBool(value); break
+      case 7: packet.writeFloat(value.x).writeFloat(value.y).writeFloat(value.z); break
+      case 8: packet.writePosition(value); break
+      case 9: packet.writeBool(value != null), value && packet.writePosition(value); break
+      case 10: packet.writeVarInt(value); break
+      case 11: packet.writeBool(value != null), value && packet.write(value); break
+      case 12: packet.writeVarInt(value); break
+      case 13: packet.writeNBT("", value); break
+    }
+  }
+  packet.writeInt8(-1)
+  return packet
 }

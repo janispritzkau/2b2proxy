@@ -1,7 +1,8 @@
-import { Client, PacketReader, PacketWriter, Packet, ServerConnection } from "mcproto"
-import * as nbt from "nbt-ts"
+import { Client, PacketReader, PacketWriter, Packet, ServerConnection, State, nbt } from "mcproto"
 import { reactive, markRaw } from "@vue/reactivity"
 import * as chat from "mc-chat-format"
+import { validateOrRefreshToken } from "./utils"
+import { Profile } from "./data"
 
 export interface PlayerListItem {
   name: string
@@ -76,7 +77,46 @@ export interface Queue {
   time: string
 }
 
+export class ConnectError extends Error {
+  constructor(public reason: chat.StringComponent) {
+    super(`Failed to connect: ${chat.format(reason)}`)
+  }
+}
+
 export class Connection {
+  static async connect(profile: Profile, host = "localhost", port = 25566) {
+    if (!await validateOrRefreshToken(profile)) throw new Error("Failed to refresh token")
+
+    const client = await Client.connect(host, port, {
+      profile: profile.id,
+      accessToken: profile.accessToken
+    })
+
+    client.send(new PacketWriter(0x0).writeVarInt(340)
+      .writeString(host).writeUInt16(client.socket.remotePort!)
+      .writeVarInt(State.Login))
+
+    client.send(new PacketWriter(0x0).writeString(profile.name))
+
+    let disconnectReason: chat.StringComponent | undefined
+
+    const disconnectListener = client.onPacket(0x0, packet => {
+      disconnectReason = chat.convert(packet.readJSON())
+      client.end()
+    })
+
+    try {
+      await client.nextPacket(0x2, false)
+      disconnectListener.dispose()
+    } catch (error) {
+      if (disconnectReason) {
+        throw new ConnectError(disconnectReason)
+      }
+    }
+
+    return new Connection(profile.id, client)
+  }
+
   // Properties for state tracking
   player: Player = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }
   inventory = new Map<number, Item>()
@@ -90,7 +130,7 @@ export class Connection {
   entities = new Map<number, Entity>()
   objects = new Map<number, number>()
 
-  eid = 0
+  eid = -1
   gamemode = 0
   dimension = 0
   difficulty = 0
@@ -140,23 +180,30 @@ export class Connection {
     if (this.conn) throw new Error("Already proxied")
     reactive(this).conn = conn
 
+    if (this.eid == -1) await this.client.nextPacket(0x23, false)
+    if (eid == -1) eid = this.eid
+
     for (const packet of this.getPackets(respawn, eid)) {
       await conn.send(this.mapClientboundPacket(packet, eid))
     }
 
-    conn.on("packet", packet => {
-      if (packet.id == 0x0 || packet.id == 0xb) return
+    const serverboundListener = conn.on("packet", packet => {
+      if (packet.offset != 0 || packet.id == 0x0 || packet.id == 0xb) return
       this.client.send(this.mapServerboundPacket(packet, eid))
     })
 
-    const packetListener = this.client.on("packet", packet => conn.send(this.mapClientboundPacket(packet, eid)))
+    const clientboundListener = this.client.on("packet", packet => conn.send(this.mapClientboundPacket(packet, eid)))
     const endListener = this.client.on("end", () => conn.end())
 
-    conn.on("end", () => {
-      packetListener.dispose()
+    const unproxy = () => {
+      serverboundListener.dispose()
+      clientboundListener.dispose()
       endListener.dispose()
       reactive(this).conn = null
-    })
+    }
+
+    conn.on("end", unproxy)
+    return unproxy
   }
 
   sendChatMessage(text: string) {
@@ -164,6 +211,7 @@ export class Connection {
   }
 
   private track() {
+    // chat message
     this.client.onPacket(0xf, packet => {
       const message = packet.readJSON()
       const position = packet.readUInt8()
@@ -181,6 +229,7 @@ export class Connection {
       }
     })
 
+    // player list header and footer
     this.client.onPacket(0x4a, packet => {
       const text = chat.format(packet.readJSON())
       const match = text.match(/queue: (\d*).+time: ([^\n]+)/s)
@@ -316,11 +365,10 @@ export class Connection {
           this.inventory.delete(i)
           continue
         }
-        const count = packet.readInt8()
-        const damage = packet.readInt16()
-        const { length, value } = nbt.decode(packet.buffer.slice(packet.offset))
-        packet.offset += length
-        this.inventory.set(i, { id, count, damage, tag: value })
+        this.inventory.set(i, {
+          id, count: packet.readInt8(), damage: packet.readInt16(),
+          tag: packet.readNBT()?.value
+        })
       }
     })
 
@@ -330,11 +378,10 @@ export class Connection {
       const slot = packet.readInt16()
       const id = packet.readInt16()
       if (id == -1) return this.inventory.delete(slot)
-      const count = packet.readInt8()
-      const damage = packet.readInt16()
-      const { length, value } = nbt.decode(packet.buffer.slice(packet.offset))
-      packet.offset += length
-      this.inventory.set(slot, { id, count, damage, tag: value })
+      this.inventory.set(slot, {
+        id, count: packet.readInt8(), damage: packet.readInt16(),
+        tag: packet.readNBT()?.value
+      })
     })
 
     // TODO: 0x18 plugin channel
@@ -542,14 +589,12 @@ export class Connection {
           case 1: case 10: case 12: packet.readVarInt(); break
           case 2: packet.offset += 4; break
           case 3: case 4: packet.readString(); break
-          case 5: if (packet.readInt16() != -1) {
-            packet.offset += nbt.decode(packet.buffer.slice(packet.offset + 3)).length + 3
-          }; break
+          case 5: if (packet.readInt16() != -1) packet.offset += 3, packet.readNBT(); break
           case 7: packet.offset += 12; break
           case 8: packet.offset += 8; break
           case 9: if (packet.readBool()) packet.offset += 8; break
           case 11: if (packet.readBool()) packet.offset += 16; break
-          case 13: packet.offset += nbt.decode(packet.buffer.slice(packet.offset)).length; break
+          case 13: packet.readNBT(); break
         }
         entity.metadata.set(index, packet.buffer.slice(start, packet.offset))
       }
@@ -727,7 +772,7 @@ export class Connection {
       const slot = this.inventory.get(i)
       if (slot) {
         packet.writeInt16(slot.id).writeInt8(slot.count).writeInt16(slot.damage)
-        packet.write(nbt.encode("", slot.tag))
+        packet.writeNBT("", slot.tag)
       } else {
         packet.writeInt16(-1)
       }
@@ -846,14 +891,12 @@ export class Connection {
           case 1: case 10: case 12: packet.readVarInt(); break
           case 2: packet.offset += 4; break
           case 3: case 4: packet.readString(); break
-          case 5: if (packet.readInt16() != -1) {
-            packet.offset += nbt.decode(packet.buffer.slice(packet.offset + 3)).length
-          }; break
+          case 5: packet.readInt16() != -1 && (packet.offset += 3, packet.readNBT()); break
           case 7: packet.offset += 12; break
           case 8: packet.offset += 8; break
           case 9: if (packet.readBool()) packet.offset += 8; break
           case 11: if (packet.readBool()) packet.offset += 16; break
-          case 13: packet.offset += nbt.decode(packet.buffer.slice(packet.offset)).length; break
+          case 13: packet.readNBT(); break
         }
         writer.write(packet.buffer.slice(start, packet.offset))
       }

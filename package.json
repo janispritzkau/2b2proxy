@@ -13,8 +13,7 @@
     "cors": "^2.8.5",
     "express": "^4.17.1",
     "mc-chat-format": "^1.2.1",
-    "mcproto": "^0.7.14",
-    "nbt-ts": "^1.3.3",
+    "mcproto": "^0.8.1",
     "node-fetch": "^2.6.0",
     "web-push": "^3.4.3",
     "ws": "^7.2.3"

@@ -8,10 +8,9 @@ import fetch from "node-fetch"
 import http = require("http")
 import fs = require("fs")
 import inspector = require("inspector")
-import { Client, PacketWriter, State } from "mcproto"
 import * as chat from "mc-chat-format"
 
-import { Connection } from "./connection"
+import { Connection, ConnectError } from "./connection"
 import { startNotifier } from "./notifications"
 import { createServer } from "./server"
 import * as auth from "./auth"
@@ -158,37 +157,17 @@ app.delete("/api/profiles/:id", (req, res) => {
 app.post("/api/profiles/:id/connect", (req, res) => {
   const user = res.locals.user as data.User
   const profile = data.profiles.get(req.params.id)
-  const host = "2b2t.org"
 
   if (user.profiles.has(req.params.id) && profile) {
-    let disconnectReason: chat.StringComponent
-
-    validateOrRefreshToken(profile).then(() => Client.connect(host, null, {
-      profile: profile.id,
-      accessToken: profile.accessToken
-    })).then(async client => {
-      client.send(new PacketWriter(0x0).writeVarInt(340)
-        .writeString(host).writeUInt16(client.socket.remotePort!)
-        .writeVarInt(State.Login))
-      client.send(new PacketWriter(0x0).writeString(profile.name))
-
-      const disconnectListener = client.onPacket(0x0, packet => {
-        disconnectReason = chat.convert(packet.readJSON())
-        client.end()
-      })
-
-      await client.nextPacket(0x2, false)
-      disconnectListener.dispose()
-
-      connections.set(profile.id, new Connection(profile.id, client))
-      client.on("end", () => connections.delete(profile.id))
-
+    Connection.connect(profile).then(connection => {
+      connections.set(profile.id, connection)
+      connection.client.on("end", () => connections.delete(profile.id))
       res.json({ success: true })
-    }).catch(() => {
-      res.json({ success: false, reason: disconnectReason })
+    }).catch(error => {
+      res.json({ success: false, reason: error instanceof ConnectError ? error.reason : null })
     })
   } else {
-    return res.status(400).end()
+    res.status(400).end()
   }
 })
 

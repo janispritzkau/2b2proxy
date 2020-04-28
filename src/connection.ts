@@ -219,10 +219,11 @@ export class Connection {
     if (eid == -1) eid = this.eid
 
     for (const packet of this.getPackets(respawn, eid)) {
-      await conn.send(this.mapClientboundPacket(packet, eid))
+      conn.send(this.mapClientboundPacket(new PacketReader(packet.encode()), eid))
     }
 
     const serverboundListener = conn.on("packet", packet => {
+      // ignore teleport confirm and keep alive packet
       if (packet.id == 0x0 || packet.id == 0xb) return
       this.client.send(this.mapServerboundPacket(packet, eid))
     })
@@ -752,21 +753,20 @@ export class Connection {
     // TODO: 0x4f entity effect
   }
 
-  private getPackets(respawn = false, eid: number) {
-    const packets: Packet[] = []
+  private * getPackets(respawn = false, eid: number) {
     let packet: PacketWriter
 
     if (respawn) {
       // respawn
-      packets.push(new PacketWriter(0x35).writeInt32(this.dimension == 1 ? 0 : 1)
-        .writeUInt8(0).writeUInt8(3).writeString(""))
-      packets.push(new PacketWriter(0x35).writeInt32(this.dimension)
-        .writeUInt8(this.difficulty).writeUInt8(this.gamemode & 0x7).writeString(this.levelType))
+      yield new PacketWriter(0x35).writeInt32(this.dimension == 1 ? 0 : 1)
+        .writeUInt8(0).writeUInt8(3).writeString("")
+      yield new PacketWriter(0x35).writeInt32(this.dimension)
+        .writeUInt8(this.difficulty).writeUInt8(this.gamemode & 0x7).writeString(this.levelType)
     } else {
       // join game
-      packets.push(new PacketWriter(0x23).writeInt32(eid)
+      yield new PacketWriter(0x23).writeInt32(eid)
         .writeUInt8(this.gamemode).writeInt32(this.dimension).writeUInt8(this.difficulty)
-        .writeUInt8(0).writeString(this.levelType).writeBool(false))
+        .writeUInt8(0).writeString(this.levelType).writeBool(false)
     }
 
     // player list item
@@ -783,7 +783,7 @@ export class Connection {
       packet.writeBool(player.displayName != null)
       if (player.displayName != null) packet.writeString(player.displayName)
     }
-    packets.push(packet)
+    yield packet
 
     // teams
     for (const [name, team] of this.teams) {
@@ -794,7 +794,7 @@ export class Connection {
         .writeString(team.collisionRule).writeInt8(team.color)
       packet.writeVarInt(team.members.size)
       for (const member of team.members) packet.writeString(member)
-      packets.push(packet)
+      yield packet
     }
 
     // window items
@@ -808,76 +808,81 @@ export class Connection {
         packet.writeInt16(-1)
       }
     }
-    packets.push(packet)
+    yield packet
 
-    packets.push(new PacketWriter(0x3a).writeInt8(this.heldItem))
+    yield new PacketWriter(0x3a).writeInt8(this.heldItem)
 
-    packets.push(new PacketWriter(0x2c)
+    yield new PacketWriter(0x2c)
       .writeUInt8(+this.invulnerable | +this.flying << 1 | +this.allowFlying << 2 | +this.creativeMode << 3)
-      .writeFloat(this.flyingSpeed).writeFloat(this.fov))
+      .writeFloat(this.flyingSpeed).writeFloat(this.fov)
 
-    packets.push(new PacketWriter(0x40).writeFloat(this.xpBar).writeVarInt(this.level).writeVarInt(this.totalXp))
-    packets.push(new PacketWriter(0x41).writeFloat(this.health).writeVarInt(this.food).writeFloat(this.saturation))
+    yield new PacketWriter(0x40).writeFloat(this.xpBar).writeVarInt(this.level).writeVarInt(this.totalXp)
+    yield new PacketWriter(0x41).writeFloat(this.health).writeVarInt(this.food).writeFloat(this.saturation)
 
-    if (this.playerListHeader) packets.push(new PacketWriter(0x4a)
-      .writeJSON(this.playerListHeader).writeJSON(this.playerListFooter))
+    if (this.playerListHeader) yield new PacketWriter(0x4a)
+      .writeJSON(this.playerListHeader).writeJSON(this.playerListFooter)
 
-    packets.push(new PacketWriter(0x46, 340).writePosition(this.spawnPosition))
-    packets.push(new PacketWriter(0x47).writeUInt64(this.worldAge).writeUInt64(this.time))
+    yield new PacketWriter(0x46, 340).writePosition(this.spawnPosition)
+    yield new PacketWriter(0x47).writeUInt64(this.worldAge).writeUInt64(this.time)
 
-    if (this.raining) packets.push(new PacketWriter(0x1e).writeUInt8(2).writeFloat(0))
-    if (this.fadeValue != 0) packets.push(new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeValue))
-    if (this.fadeTime != 0) packets.push(new PacketWriter(0x1e).writeUInt8(8).writeFloat(this.fadeTime))
+    if (this.raining) yield new PacketWriter(0x1e).writeUInt8(2).writeFloat(0)
+    if (this.fadeValue != 0) yield new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeValue)
+    if (this.fadeTime != 0) yield new PacketWriter(0x1e).writeUInt8(8).writeFloat(this.fadeTime)
 
     // player position and look
-    packets.push(new PacketWriter(0x2f)
+    yield new PacketWriter(0x2f)
       .writeDouble(this.player.x).writeDouble(this.player.y).writeDouble(this.player.z)
       .writeFloat(this.player.yaw).writeFloat(this.player.pitch).writeUInt8(0)
-      .writeVarInt(0))
+      .writeVarInt(0)
 
     // chunk data
     for (const chunks of this.chunks.values()) {
       for (const chunk of chunks.values()) {
-        packets.push(...chunk)
+        for (const reader of chunk) {
+          packet = new PacketWriter(0)
+          packet.buffer = reader.buffer
+          packet.offset = reader.buffer.length
+          yield packet
+        }
       }
     }
 
     for (const [eid, entity] of this.entities) {
       if (entity.type == "object") {
-        packets.push(new PacketWriter(0x0)
+        yield new PacketWriter(0x0)
           .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeInt8(entity.objectType!)
           .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
           .writeInt8(entity.pitch!).writeInt8(entity.yaw!)
           .writeInt32(entity.objectData!)
-          .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!))
+          .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
       } else if (entity.type == "orb") {
-        packets.push(new PacketWriter(0x1)
+        yield new PacketWriter(0x1)
           .writeVarInt(eid)
           .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
-          .writeInt16(entity.orbCount!))
+          .writeInt16(entity.orbCount!)
       } else if (entity.type == "mob") {
         packet = new PacketWriter(0x3, 340)
           .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeVarInt(entity.mobType!)
           .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
           .writeInt8(entity.yaw!).writeInt8(entity.pitch!).writeInt8(entity.headPitch!)
           .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
-        packets.push(writeMetadata(packet, entity.metadata!))
+        yield writeMetadata(packet, entity.metadata!)
       } else if (entity.type == "painting") {
-        packets.push(new PacketWriter(0x4, 340)
+        yield new PacketWriter(0x4, 340)
           .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
           .writeString(entity.paintingTitle!)
           .writePosition(entity.x, entity.y, entity.z)
-          .writeVarInt(entity.paintingDirection!))
+          .writeVarInt(entity.paintingDirection!)
       } else if (entity.type == "player") {
         packet = new PacketWriter(0x5, 340)
           .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
           .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
           .writeInt8(entity.yaw!).writeInt8(entity.pitch!)
-        packets.push(writeMetadata(packet, entity.metadata!))
+        yield writeMetadata(packet, entity.metadata!)
       }
 
       if (entity.metadata && entity.type != "mob" && entity.type != "player") {
-        packets.push(writeMetadata(new PacketWriter(0x3c, 340).writeVarInt(eid), entity.metadata))
+        yield writeMetadata(new PacketWriter(0x3c, 340).writeVarInt(eid), entity.metadata)
       }
 
       if (entity.properties) {
@@ -887,7 +892,7 @@ export class Connection {
           for (const modifier of property.modifiers) packet.write(Buffer.from(modifier.uuid, "hex"))
             .writeDouble(modifier.amount).writeInt8(modifier.operation)
         }
-        packets.push(packet)
+        yield packet
       }
     }
 
@@ -895,7 +900,7 @@ export class Connection {
       if (entity.passengers) {
         packet = new PacketWriter(0x43).writeVarInt(eid).writeVarInt(entity.passengers.length)
         for (const eid of entity.passengers) packet.writeVarInt(eid)
-        packets.push(packet)
+        yield packet
       }
     }
 
@@ -907,11 +912,8 @@ export class Connection {
         .writeUInt8(icon.x).writeUInt8(icon.y)
       packet.writeUInt8(128).writeUInt8(128).writeUInt8(0).writeUInt8(0)
       packet.writeVarInt(16384).write(Buffer.from(map.data))
-      packets.push(packet)
+      yield packet
     }
-
-    return packets.map(packet => new PacketReader(packet instanceof PacketWriter
-      ? packet.encode() : packet instanceof Buffer ? packet : packet.buffer))
   }
 
   private mapClientboundPacket(packet: PacketReader, clientEid: number) {

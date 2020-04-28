@@ -1,5 +1,5 @@
 import { Client, PacketReader, PacketWriter, Packet, ServerConnection, State, nbt, Position } from "mcproto"
-import { reactive, markRaw } from "@vue/reactivity"
+import { reactive, markRaw, toRaw } from "@vue/reactivity"
 import * as chat from "mc-chat-format"
 import { validateOrRefreshToken } from "./utils"
 import { Profile } from "./data"
@@ -91,7 +91,26 @@ export interface Player {
   pitch: number
 }
 
-export type Chunk = PacketReader[]
+export interface ChunkSection {
+  blocks: Uint16Array
+  blockLight: Buffer
+  skyLight?: Buffer
+}
+
+export interface BlockEntity {
+  [key: string]: any
+  x: nbt.Int
+  y: nbt.Int
+  z: nbt.Int
+}
+
+export interface Chunk {
+  x: number
+  z: number
+  sections: (ChunkSection | null)[]
+  biomes: Buffer
+  blockEntities: BlockEntity[]
+}
 
 export interface Queue {
   position: number
@@ -219,7 +238,7 @@ export class Connection {
     if (eid == -1) eid = this.eid
 
     for (const packet of this.getPackets(respawn, eid)) {
-      conn.send(this.mapClientboundPacket(new PacketReader(packet.encode()), eid))
+      await conn.send(this.mapClientboundPacket(new PacketReader(packet.encode()), eid))
     }
 
     const serverboundListener = conn.on("packet", packet => {
@@ -337,12 +356,37 @@ export class Connection {
     })
 
     // update block entity
-    // block change
-    this.client.on("packet", packet => {
-      if (packet.id != 0x9 && packet.id != 0xb) return
+    this.client.onPacket(0x9, packet => {
       const pos = packet.readPosition()
+      packet.readUInt8() // action
+      const tag = packet.readNBT()
       const chunk = this.getChunk(Math.floor(pos.x / 16), Math.floor(pos.z / 16))
-      if (chunk) chunk.push(packet)
+      if (!chunk) return
+
+      const index = chunk.blockEntities
+        .findIndex(block => +block.x == pos.x && +block.y == pos.y && +block.z == pos.z)
+
+      if (index == -1) {
+        chunk.blockEntities.push(tag.value as BlockEntity)
+      } else {
+        chunk.blockEntities[index] = { ...chunk.blockEntities[index], ...tag.value as BlockEntity }
+      }
+    })
+
+    // block change
+    this.client.onPacket(0xb, packet => {
+      const pos = packet.readPosition()
+      const block = packet.readVarInt()
+
+      const chunk = this.getChunk(Math.floor(pos.x / 16), Math.floor(pos.z / 16))
+      if (!chunk) return
+
+      const section = chunk.sections[Math.floor(pos.y / 16)]
+      if (!section) return
+
+      section.blocks[mod(pos.y, 16) * 256 + mod(pos.z, 16) * 16 + mod(pos.x, 16)] = block
+      if (block == 0) chunk.blockEntities = chunk.blockEntities
+        .filter(block => +block.x != pos.x && +block.y != pos.y && +block.z != pos.z)
     })
 
     // boss bar
@@ -383,7 +427,22 @@ export class Connection {
     // multi block change
     this.client.onPacket(0x10, packet => {
       const chunk = this.getChunk(packet.readInt32(), packet.readInt32())
-      if (chunk) chunk.push(packet)
+      if (!chunk) return
+
+      for (let i = packet.readVarInt(); i--;) {
+        const value = packet.readUInt8()
+        const x = value >> 4
+        const z = value & 0xf
+        const y = packet.readUInt8()
+        const block = packet.readVarInt()
+
+        const section = chunk.sections[Math.floor(y / 16)]
+        if (!section) return
+
+        section.blocks[mod(y, 16) * 256 + z * 16 + x] = block
+        if (block == 0) chunk.blockEntities = chunk.blockEntities
+          .filter(block => +block.x != x && +block.y != y && +block.z != z)
+      }
     })
 
     // window items
@@ -417,8 +476,25 @@ export class Connection {
 
     // explosion
     this.client.onPacket(0x1c, packet => {
-      const chunk = this.getChunk(Math.floor(packet.readFloat() / 16), Math.floor((packet.readFloat(), packet.readFloat()) / 16))
-      if (chunk) chunk.push(packet)
+      const cx = packet.readFloat() | 0
+      const cy = packet.readFloat() | 0
+      const cz = packet.readFloat() | 0
+      packet.readFloat() // radius
+
+      for (let i = packet.readUInt32(); i--;) {
+        const x = cx + packet.readInt8()
+        const y = cy + packet.readInt8()
+        const z = cz + packet.readInt8()
+
+        const chunk = this.getChunk(Math.floor(x / 16), Math.floor(z / 16))
+        if (!chunk) return
+
+        const section = chunk.sections[Math.floor(y / 16)]
+        if (!section) return
+
+        section.blocks[mod(y, 16) * 256 + mod(z, 16) * 16 + mod(x, 16)] = 0
+        chunk.blockEntities = chunk.blockEntities.filter(block => +block.x != x && +block.y != y && +block.z != z)
+      }
     })
 
     // unload chunk
@@ -449,12 +525,46 @@ export class Connection {
       const chunkX = packet.readInt32()
       const chunkZ = packet.readInt32()
       const fullChunk = packet.readBool()
-      if (fullChunk) {
-        this.setChunk(chunkX, chunkZ, [packet])
-      } else {
-        const chunk = this.getChunk(chunkX, chunkZ)
-        if (chunk) chunk.push(packet)
+      const sectionBitMask = packet.readVarInt()
+      packet.readVarInt() // data size
+
+      const chunk = fullChunk ? this.setChunk(chunkX, chunkZ, {
+        x: chunkX, z: chunkZ,
+        sections: Array(16).fill(null),
+        biomes: Buffer.alloc(0),
+        blockEntities: []
+      }) : this.getChunk(chunkX, chunkZ)
+      if (!chunk) return
+
+      for (let s = 0; s < 16; s++) {
+        if ((sectionBitMask & (1 << s)) == 0) continue
+        const bitsPerBlock = packet.readUInt8()
+        const bitMask = (1 << bitsPerBlock) - 1
+        const palette = [...Array(packet.readVarInt())].map(() => packet.readVarInt())
+        const data = packet.read(packet.readVarInt() * 8)
+        const blocks = new Uint16Array(4096)
+        for (let i = 0; i < 4096; i++) {
+          const start = (i * bitsPerBlock / 32) | 0
+          const end = (((i + 1) * bitsPerBlock - 1) / 32) | 0
+          const offset = (i * bitsPerBlock) % 32
+          const first = (start - start % 2 * 2 + 1) * 4
+          let value = data.readInt32BE(first) >>> offset
+          if (start != end) value |= data.readInt32BE((end - end % 2 * 2 + 1) * 4) << (32 - offset)
+          value &= bitMask
+          blocks[i] = bitsPerBlock > 8 ? value : palette[value]
+        }
+
+        const section: ChunkSection = { blocks, blockLight: packet.read(2048) }
+
+        if (this.dimension == 0) section.skyLight = packet.read(2048)
+        chunk.sections[s] = section
       }
+
+      if (fullChunk) chunk.biomes = packet.read(256)
+
+      chunk.blockEntities = [...Array(packet.readVarInt())].map(() => {
+        return packet.readNBT().value as BlockEntity
+      })
     })
 
     // join game
@@ -837,13 +947,54 @@ export class Connection {
 
     // chunk data
     for (const chunks of this.chunks.values()) {
-      for (const chunk of chunks.values()) {
-        for (const reader of chunk) {
-          packet = new PacketWriter(0)
-          packet.buffer = reader.buffer
-          packet.offset = reader.buffer.length
-          yield packet
+      for (const chunk of toRaw(chunks).values()) {
+        packet = new PacketWriter(0x20)
+        packet.writeInt32(chunk.x)
+        packet.writeInt32(chunk.z)
+        packet.writeBool(true)
+
+        const bitsPerBlock = 13
+        const { dimension } = this
+        const writer = new PacketWriter(0)
+        writer.buffer = Buffer.alloc(65536)
+        writer.offset = 0
+
+        let sectionBitMask = 0
+        for (let s = 0; s < 16; s++) {
+          const section = chunk.sections[s]
+          if (!section) continue
+
+          sectionBitMask |= 1 << s
+          writer.writeUInt8(bitsPerBlock)
+          writer.writeVarInt(0)
+          writer.writeVarInt(4096 * bitsPerBlock / 64)
+
+          const data = Buffer.alloc(4096 * bitsPerBlock / 8)
+          for (let i = 0; i < 4096; i++) {
+            const start = (i * bitsPerBlock / 32) | 0
+            const end = (((i + 1) * bitsPerBlock - 1) / 32) | 0
+            const offset = (i * bitsPerBlock) % 32
+            const first = (start - start % 2 * 2 + 1) * 4
+            data.writeInt32BE(data.readInt32BE(first) | section.blocks[i] << offset, first)
+            if (start != end) {
+              const last = (end - end % 2 * 2 + 1) * 4
+              data.writeInt32BE(data.readInt32BE(last) | section.blocks[i] >>> (32 - offset), last)
+            }
+          }
+          writer.write(data)
+          writer.write(section.blockLight)
+          if (dimension == 0) writer.write(section.skyLight!)
         }
+        writer.write(chunk.biomes)
+
+        packet.writeVarInt(sectionBitMask)
+        packet.writeVarInt(writer.offset)
+        packet.write(writer.encode())
+
+        packet.writeVarInt(chunk.blockEntities.length)
+        for (const blockEntity of chunk.blockEntities) packet.writeNBT("", blockEntity)
+
+        yield packet
       }
     }
 
@@ -1079,3 +1230,5 @@ function writeMetadata(packet: PacketWriter, metadata: Metadata) {
   packet.writeInt8(-1)
   return packet
 }
+
+const mod = (x: number, n: number) => ((x % n) + n) % n

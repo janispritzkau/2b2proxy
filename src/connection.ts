@@ -80,7 +80,9 @@ export interface Entity {
   vz?: number
   properties?: EntityProperties
   metadata?: Metadata
-  passengers?: number[]
+  equipment?: Map<number, Item>
+  passengers?: Set<number>
+  attachedEid?: number
 }
 
 export interface Player {
@@ -145,8 +147,9 @@ export class Connection {
       client.end()
     })
 
+    let packet!: PacketReader
     try {
-      await client.nextPacket(0x2, false)
+      packet = await client.nextPacket(0x2, false)
       disconnectListener.dispose()
     } catch (error) {
       if (disconnectReason) {
@@ -154,7 +157,8 @@ export class Connection {
       }
     }
 
-    return new Connection(profile.id, client)
+    return new Connection(profile.id, client,
+      packet.readString().replace(/-/g, ""), packet.readString())
   }
 
   // Properties for state tracking
@@ -165,6 +169,7 @@ export class Connection {
   teams = new Map<string, Team>()
   bossBars = new Map<string, BossBar>()
   maps = new Map<number, MapData>()
+  unlockedRecipes = new Set<number>()
 
   chunks = new Map<number, Map<number, Chunk>>()
   entities = new Map<number, Entity>()
@@ -202,6 +207,7 @@ export class Connection {
   fadeValue = 0
   fadeTime = 0
 
+  camera: number | null = null
   ridingEid: number | null = null
 
   // Connection related properties
@@ -214,7 +220,7 @@ export class Connection {
 
   queue: Queue | null = null
 
-  constructor(public id: string, public client: Client) {
+  constructor(public id: string, public client: Client, public uuid: string, public username: string) {
     this.client = markRaw(client)
 
     this.client.onPacket(0x1a, packet => {
@@ -480,7 +486,6 @@ export class Connection {
     })
 
     // TODO: 0x18 plugin channel
-    // TODO: 0x1b entity status
 
     // explosion
     this.client.onPacket(0x1c, packet => {
@@ -697,7 +702,14 @@ export class Connection {
       this.client.send(new PacketWriter(0x0).writeVarInt(teleportId))
     })
 
-    // TODO: 0x31 unlock recipes
+    // unlock recipes
+    this.client.onPacket(0x31, packet => {
+      const action = packet.readVarInt()
+      packet.readBool() // crafting book open
+      packet.readBool() // filter craftable
+      for (let i = packet.readVarInt(); i--;) this.unlockedRecipes.add(packet.readVarInt())
+      if (action == 0) for (let i = packet.readVarInt(); i--;) this.unlockedRecipes.add(packet.readVarInt())
+    })
 
     // destroy entities
     this.client.onPacket(0x32, packet => {
@@ -705,9 +717,6 @@ export class Connection {
         this.entities.delete(packet.readVarInt())
       }
     })
-
-    // TODO: 0x33 remove entity effect
-    // TODO: 0x34 resource pack send
 
     // respawn
     this.client.onPacket(0x35, packet => {
@@ -726,12 +735,14 @@ export class Connection {
     })
 
     // TODO: 0x38 world border
-    // TODO: 0x39 camera
+
+    // camera
+    this.client.onPacket(0x39, packet => {
+      this.camera = packet.readVarInt()
+    })
 
     // held item change
     this.client.onPacket(0x3a, packet => this.heldItem = packet.readInt8())
-
-    // TODO: 0x3b display scoreboard
 
     // entity metadata
     this.client.onPacket(0x3c, packet => {
@@ -743,7 +754,12 @@ export class Connection {
       }
     })
 
-    // TODO: 0x3d attach entity
+    // attach entity
+    this.client.onPacket(0x3d, packet => {
+      const entity = this.entities.get(packet.readInt32())
+      if (!entity) return
+      entity.attachedEid = packet.readInt32()
+    })
 
     // entity velocity
     this.client.onPacket(0x3e, packet => {
@@ -754,7 +770,18 @@ export class Connection {
       entity.vz = packet.readInt16()
     })
 
-    // TODO: 0x3f entity equipment
+    // entity equipment
+    this.client.onPacket(0x3f, packet => {
+      const entity = this.entities.get(packet.readVarInt())
+      if (!entity) return
+      if (!entity.equipment) entity.equipment = new Map()
+      const slot = packet.readVarInt()
+      const id = packet.readInt16()
+      if (id == -1) entity.equipment.delete(slot)
+      else entity.equipment.set(slot, {
+        id, count: packet.readInt8(), damage: packet.readInt16(), tag: packet.readNBT().value
+      })
+    })
 
     // set experience
     this.client.onPacket(0x40, packet => {
@@ -770,19 +797,17 @@ export class Connection {
       this.saturation = packet.readFloat()
     })
 
-    // TODO: 0x42 scoreboard objective
-
     // set passengers
     this.client.onPacket(0x43, packet => {
       const eid = packet.readVarInt()
       const entity = this.entities.get(eid)
       if (!entity) return
       if (this.ridingEid == eid) this.ridingEid = null
-      entity.passengers = []
+      entity.passengers = new Set()
       for (let i = packet.readVarInt(); i--;) {
         const passengerEid = packet.readVarInt()
         if (passengerEid == this.eid) this.ridingEid = this.eid
-        entity.passengers.push(passengerEid)
+        entity.passengers.add(passengerEid)
       }
     })
 
@@ -819,8 +844,6 @@ export class Connection {
       }
     })
 
-    // TODO: 0x45 update score
-
     // spawn position
     this.client.onPacket(0x46, packet => this.spawnPosition = packet.readPosition())
 
@@ -829,8 +852,6 @@ export class Connection {
       this.worldAge = packet.readUInt64()
       this.time = packet.readUInt64()
     })
-
-    // TODO: 0x48 title
 
     // player list header and footer
     this.client.onPacket(0x4a, packet => {
@@ -868,8 +889,6 @@ export class Connection {
         entity.properties.set(key, { value, modifiers })
       }
     })
-
-    // TODO: 0x4f entity effect
   }
 
   private * getPackets(respawn = false, eid: number) {
@@ -929,6 +948,17 @@ export class Connection {
     }
     yield packet
 
+    for (const [id, map] of this.maps) {
+      packet = new PacketWriter(0x24).writeVarInt(id).writeUInt8(map.scale)
+      packet.writeBool(map.showIcons).writeVarInt(map.icons.length)
+      for (const icon of map.icons) packet
+        .writeUInt8(icon.type << 4 | icon.direction)
+        .writeUInt8(icon.x).writeUInt8(icon.y)
+      packet.writeUInt8(128).writeUInt8(128).writeUInt8(0).writeUInt8(0)
+      packet.writeVarInt(16384).write(Buffer.from(map.data))
+      yield packet
+    }
+
     yield new PacketWriter(0x3a).writeInt8(this.heldItem)
 
     yield new PacketWriter(0x2c)
@@ -948,11 +978,84 @@ export class Connection {
     if (this.fadeValue != 0) yield new PacketWriter(0x1e).writeUInt8(7).writeFloat(this.fadeValue)
     if (this.fadeTime != 0) yield new PacketWriter(0x1e).writeUInt8(8).writeFloat(this.fadeTime)
 
+    packet = new PacketWriter(0x31)
+      .writeVarInt(0).writeBool(false).writeBool(false)
+      .writeVarInt(this.unlockedRecipes.size)
+    for (const id of this.unlockedRecipes) packet.writeVarInt(id)
+    yield packet.writeVarInt(0)
+
     // player position and look
     yield new PacketWriter(0x2f)
       .writeDouble(this.player.x).writeDouble(this.player.y).writeDouble(this.player.z)
       .writeFloat(this.player.yaw).writeFloat(this.player.pitch).writeUInt8(0)
       .writeVarInt(0)
+
+    for (const [eid, entity] of this.entities) {
+      if (entity.type == "object") {
+        yield new PacketWriter(0x0)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeInt8(entity.objectType!)
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
+          .writeInt8(entity.pitch!).writeInt8(entity.yaw!)
+          .writeInt32(entity.objectData!)
+          .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
+      } else if (entity.type == "orb") {
+        yield new PacketWriter(0x1)
+          .writeVarInt(eid)
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
+          .writeInt16(entity.orbCount!)
+      } else if (entity.type == "mob") {
+        packet = new PacketWriter(0x3, 340)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeVarInt(entity.mobType!)
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
+          .writeInt8(entity.yaw!).writeInt8(entity.pitch!).writeInt8(entity.headPitch!)
+          .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
+        yield writeMetadata(packet, entity.metadata!)
+      } else if (entity.type == "painting") {
+        yield new PacketWriter(0x4, 340)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
+          .writeString(entity.paintingTitle!)
+          .writePosition(entity.x, entity.y, entity.z)
+          .writeVarInt(entity.paintingDirection!)
+      } else if (entity.type == "player" && eid != this.eid) {
+        packet = new PacketWriter(0x5, 340)
+          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
+          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
+          .writeInt8(entity.yaw!).writeInt8(entity.pitch!)
+        yield writeMetadata(packet, entity.metadata!)
+      }
+
+      if (entity.metadata && entity.type != "mob" && (entity.type != "player" || eid == this.eid)) {
+        yield writeMetadata(new PacketWriter(0x3c, 340).writeVarInt(eid), entity.metadata)
+      }
+
+      if (entity.properties) {
+        packet = new PacketWriter(0x4e).writeVarInt(eid).writeUInt32(entity.properties.size)
+        for (const [key, property] of entity.properties) {
+          packet.writeString(key).writeDouble(property.value).writeVarInt(property.modifiers.length)
+          for (const modifier of property.modifiers) packet.write(Buffer.from(modifier.uuid, "hex"))
+            .writeDouble(modifier.amount).writeInt8(modifier.operation)
+        }
+        yield packet
+      }
+
+      if (entity.equipment) {
+        for (const [slot, item] of entity.equipment) yield new PacketWriter(0x3f)
+          .writeVarInt(eid).writeVarInt(slot)
+          .writeInt16(item.id).writeInt8(item.count)
+          .writeInt16(item.damage).writeNBT("", item.tag)
+      }
+    }
+
+    if (this.camera != null) yield new PacketWriter(0x39).writeVarInt(this.camera)
+
+    for (const [eid, entity] of this.entities) {
+      if (entity.passengers) {
+        packet = new PacketWriter(0x43).writeVarInt(eid).writeVarInt(entity.passengers.size)
+        for (const eid of entity.passengers) packet.writeVarInt(eid)
+        yield packet
+      }
+      if (entity.attachedEid) yield new PacketWriter(0x3d).writeInt32(eid).writeInt32(entity.attachedEid)
+    }
 
     // chunk data
     for (const chunks of this.chunks.values()) {
@@ -1004,74 +1107,6 @@ export class Connection {
 
         yield packet
       }
-    }
-
-    for (const [eid, entity] of this.entities) {
-      if (entity.type == "object") {
-        yield new PacketWriter(0x0)
-          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeInt8(entity.objectType!)
-          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
-          .writeInt8(entity.pitch!).writeInt8(entity.yaw!)
-          .writeInt32(entity.objectData!)
-          .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
-      } else if (entity.type == "orb") {
-        yield new PacketWriter(0x1)
-          .writeVarInt(eid)
-          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
-          .writeInt16(entity.orbCount!)
-      } else if (entity.type == "mob") {
-        packet = new PacketWriter(0x3, 340)
-          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex")).writeVarInt(entity.mobType!)
-          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
-          .writeInt8(entity.yaw!).writeInt8(entity.pitch!).writeInt8(entity.headPitch!)
-          .writeInt16(entity.vx!).writeInt16(entity.vy!).writeInt16(entity.vz!)
-        yield writeMetadata(packet, entity.metadata!)
-      } else if (entity.type == "painting") {
-        yield new PacketWriter(0x4, 340)
-          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
-          .writeString(entity.paintingTitle!)
-          .writePosition(entity.x, entity.y, entity.z)
-          .writeVarInt(entity.paintingDirection!)
-      } else if (entity.type == "player" && eid != this.eid) {
-        packet = new PacketWriter(0x5, 340)
-          .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
-          .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
-          .writeInt8(entity.yaw!).writeInt8(entity.pitch!)
-        yield writeMetadata(packet, entity.metadata!)
-      }
-
-      if (entity.metadata && entity.type != "mob" && (entity.type != "player" || eid == this.eid)) {
-        yield writeMetadata(new PacketWriter(0x3c, 340).writeVarInt(eid), entity.metadata)
-      }
-
-      if (entity.properties) {
-        packet = new PacketWriter(0x4e).writeVarInt(eid).writeUInt32(entity.properties.size)
-        for (const [key, property] of entity.properties) {
-          packet.writeString(key).writeDouble(property.value).writeVarInt(property.modifiers.length)
-          for (const modifier of property.modifiers) packet.write(Buffer.from(modifier.uuid, "hex"))
-            .writeDouble(modifier.amount).writeInt8(modifier.operation)
-        }
-        yield packet
-      }
-    }
-
-    for (const [eid, entity] of this.entities) {
-      if (entity.passengers) {
-        packet = new PacketWriter(0x43).writeVarInt(eid).writeVarInt(entity.passengers.length)
-        for (const eid of entity.passengers) packet.writeVarInt(eid)
-        yield packet
-      }
-    }
-
-    for (const [id, map] of this.maps) {
-      packet = new PacketWriter(0x24).writeVarInt(id).writeUInt8(map.scale)
-      packet.writeBool(map.showIcons).writeVarInt(map.icons.length)
-      for (const icon of map.icons) packet
-        .writeUInt8(icon.type << 4 | icon.direction)
-        .writeUInt8(icon.x).writeUInt8(icon.y)
-      packet.writeUInt8(128).writeUInt8(128).writeUInt8(0).writeUInt8(0)
-      packet.writeVarInt(16384).write(Buffer.from(map.data))
-      yield packet
     }
   }
 

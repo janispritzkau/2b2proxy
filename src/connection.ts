@@ -222,6 +222,8 @@ export class Connection {
       this.client.end()
     })
 
+    this.proxy = this.proxy.bind(this)
+    this.mapServerboundPacket = this.mapServerboundPacket.bind(reactive(this))
     this.track.call(reactive(this))
   }
 
@@ -954,9 +956,8 @@ export class Connection {
         packet.writeBool(true)
 
         const bitsPerBlock = 13
-        const { dimension } = this
         const writer = new PacketWriter(0)
-        writer.buffer = Buffer.alloc(65536)
+        writer.buffer = Buffer.alloc(1024 * 16)
         writer.offset = 0
 
         let sectionBitMask = 0
@@ -983,7 +984,7 @@ export class Connection {
           }
           writer.write(data)
           writer.write(section.blockLight)
-          if (dimension == 0) writer.write(section.skyLight!)
+          if (this.dimension == 0) writer.write(section.skyLight!)
         }
         writer.write(chunk.biomes)
 

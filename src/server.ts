@@ -37,17 +37,25 @@ export function createServer(connections: Map<string, Connection>) {
     const eid = 9999999
 
     // login success
-    client.send(new PacketWriter(0x2)
+    await client.send(new PacketWriter(0x2)
       .writeString(uuid)
       .writeString(username))
 
     // join game
-    client.send(new PacketWriter(0x23)
+    await client.send(new PacketWriter(0x23)
       .writeInt32(eid).writeUInt8(3).writeInt32(1).writeUInt16(0)
       .writeString("flat").writeBool(false))
 
     // player position and look
     client.send(new PacketWriter(0x2f).write(Buffer.alloc(8 * 3 + 4 * 2 + 2)))
+
+    // player list item
+    client.send(new PacketWriter(0x2e)
+      .writeVarInt(0).writeVarInt(1)
+      .write(Buffer.from(uuid.replace(/-/g, ""), "hex"))
+      .writeString(username).writeVarInt(0)
+      .writeVarInt(3).writeVarInt(0)
+      .writeBool(true).writeJSON({ text: `[Proxy] ${username}`, color: "gray" }))
 
     const profiles = [...user.profiles].map(name => data.profiles.get(name)!)
 
@@ -98,7 +106,7 @@ export function createServer(connections: Map<string, Connection>) {
         clearInterval(interval)
 
         if (unproxyLastConnection) unproxyLastConnection()
-        unproxyLastConnection = await connection.proxy(client, eid, true)
+        unproxyLastConnection = await connection.proxy(client, eid, uuid.replace(/-/g, ""), true)
       }
     })
 

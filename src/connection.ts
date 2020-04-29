@@ -1,5 +1,5 @@
-import { Client, PacketReader, PacketWriter, Packet, ServerConnection, State, nbt, Position } from "mcproto"
-import { reactive, markRaw, toRaw } from "@vue/reactivity"
+import { Client, PacketReader, PacketWriter, ServerConnection, State, nbt, Position } from "mcproto"
+import { reactive, markRaw, toRaw, effect, stop } from "@vue/reactivity"
 import * as chat from "mc-chat-format"
 import { validateOrRefreshToken } from "./utils"
 import { Profile } from "./data"
@@ -232,7 +232,7 @@ export class Connection {
     this.client.end()
   }
 
-  async proxy(conn: ServerConnection, eid = this.eid, respawn = false) {
+  async proxy(conn: ServerConnection, eid = this.eid, uuid: string, respawn = false) {
     if (this.conn) throw new Error("Already proxied")
     reactive(this).conn = conn
 
@@ -242,6 +242,11 @@ export class Connection {
     for (const packet of this.getPackets(respawn, eid)) {
       await conn.send(this.mapClientboundPacket(new PacketReader(packet.encode()), eid))
     }
+
+    const gamemodeEffect = effect(() => conn.send(new PacketWriter(0x2e)
+      .writeVarInt(1).writeVarInt(1)
+      .write(Buffer.from(uuid, "hex"))
+      .writeVarInt(reactive(this).gamemode)))
 
     const serverboundListener = conn.on("packet", packet => {
       // ignore teleport confirm and keep alive packet
@@ -253,6 +258,7 @@ export class Connection {
     const endListener = this.client.on("end", () => conn.end())
 
     const unproxy = () => {
+      stop(gamemodeEffect)
       serverboundListener.dispose()
       clientboundListener.dispose()
       endListener.dispose()
@@ -576,6 +582,7 @@ export class Connection {
       this.dimension = packet.readInt32()
       this.difficulty = packet.readUInt8()
       this.levelType = (packet.readUInt8(), packet.readString())
+      this.entities.set(this.eid, { type: "player", eid: this.eid, x: 0, y: 0, z: 0 })
     })
 
     // map
@@ -1025,7 +1032,7 @@ export class Connection {
           .writeString(entity.paintingTitle!)
           .writePosition(entity.x, entity.y, entity.z)
           .writeVarInt(entity.paintingDirection!)
-      } else if (entity.type == "player") {
+      } else if (entity.type == "player" && eid != this.eid) {
         packet = new PacketWriter(0x5, 340)
           .writeVarInt(eid).write(Buffer.from(entity.uuid!, "hex"))
           .writeDouble(entity.x).writeDouble(entity.y).writeDouble(entity.z)
@@ -1033,7 +1040,7 @@ export class Connection {
         yield writeMetadata(packet, entity.metadata!)
       }
 
-      if (entity.metadata && entity.type != "mob" && entity.type != "player") {
+      if (entity.metadata && entity.type != "mob" && (entity.type != "player" || eid == this.eid)) {
         yield writeMetadata(new PacketWriter(0x3c, 340).writeVarInt(eid), entity.metadata)
       }
 
@@ -1070,7 +1077,7 @@ export class Connection {
 
   private mapClientboundPacket(packet: PacketReader, clientEid: number) {
     packet = packet.clone()
-    if ([0x6, 0x8, 0x26, 0x27, 0x28, 0x30, 0x33, 0x36, 0x3e, 0x3f, 0x4c, 0x4e, 0x4f].includes(packet.id)) {
+    if ([0x6, 0x8, 0x26, 0x27, 0x28, 0x30, 0x33, 0x36, 0x39, 0x3e, 0x3f, 0x4c, 0x4e, 0x4f].includes(packet.id)) {
       // entity and player related packets
       const eid = packet.readVarInt()
       return new PacketWriter(packet.id).writeVarInt(eid == this.eid ? clientEid : eid)

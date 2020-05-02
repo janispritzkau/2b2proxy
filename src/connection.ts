@@ -1,6 +1,9 @@
 import { Client, PacketReader, PacketWriter, ServerConnection, State, nbt, Position } from "mcproto"
 import { reactive, markRaw, toRaw, effect, stop } from "@vue/reactivity"
 import * as chat from "mc-chat-format"
+import { performance } from "perf_hooks"
+import { createGzip, Gzip } from "zlib"
+import * as fs from "fs"
 import { validateOrRefreshToken } from "./utils"
 import { Profile } from "./data"
 
@@ -219,6 +222,7 @@ export class Connection {
   lastChatMessages: chat.StringComponent[] = []
 
   queue: Queue | null = null
+  dumpStream?: Gzip
 
   constructor(public id: string, public client: Client, public uuid: string, public username: string) {
     this.client = markRaw(client)
@@ -231,6 +235,39 @@ export class Connection {
     this.proxy = this.proxy.bind(this)
     this.mapServerboundPacket = this.mapServerboundPacket.bind(reactive(this))
     this.track.call(reactive(this))
+
+    const interval = setInterval(() => {
+      if (this.dumpStream) this.dumpStream.flush()
+    }, 30000)
+
+    this.client.on("packet", packet => {
+      if (packet.id != 0x1f) this.dumpPacket(packet.buffer, false)
+    })
+
+    this.client.on("end", () => clearInterval(interval))
+    this.startDump()
+  }
+
+  dumpPacket(buffer: Buffer, serverbound = false, time = performance.now()) {
+    if (!this.dumpStream) return
+    const header = Buffer.alloc(13)
+    header.writeUInt32BE(buffer.length, 0)
+    header.writeInt8(+serverbound, 4)
+    header.writeDoubleBE(performance.timeOrigin + time, 5)
+    this.dumpStream.write(Buffer.concat([header, buffer]))
+  }
+
+  startDump() {
+    if (!fs.existsSync("dumps")) fs.mkdirSync("dumps")
+    const file = fs.createWriteStream(`dumps/${new Date().toISOString()}.${this.id}.dump.gz`)
+    this.dumpStream = createGzip({ level: 4 })
+    this.dumpStream.on("close", () => delete this.dumpStream)
+    this.dumpStream.pipe(file, { end: true })
+  }
+
+  stopDump() {
+    this.dumpStream?.end()
+    delete this.dumpStream
   }
 
   disconnect() {
@@ -257,7 +294,9 @@ export class Connection {
     const serverboundListener = conn.on("packet", packet => {
       // ignore teleport confirm and keep alive packet
       if (packet.id == 0x0 || packet.id == 0xb) return
-      this.client.send(this.mapServerboundPacket(packet, eid))
+      const buffer = this.mapServerboundPacket(packet, eid)
+      this.client.send(buffer)
+      this.dumpPacket(buffer, true)
     })
 
     const clientboundListener = this.client.on("packet", packet => conn.send(this.mapClientboundPacket(packet, eid)))
@@ -907,6 +946,11 @@ export class Connection {
         .writeUInt8(0).writeString(this.levelType).writeBool(false)
     }
 
+    // player abilities
+    yield new PacketWriter(0x2c)
+      .writeUInt8(+this.invulnerable | +this.flying << 1 | +this.allowFlying << 2 | +this.creativeMode << 3)
+      .writeFloat(this.flyingSpeed).writeFloat(this.fov)
+
     // player list item
     packet = new PacketWriter(0x2e).writeVarInt(0).writeVarInt(this.players.size)
     for (const [uuid, player] of this.players.entries()) {
@@ -960,10 +1004,6 @@ export class Connection {
     }
 
     yield new PacketWriter(0x3a).writeInt8(this.heldItem)
-
-    yield new PacketWriter(0x2c)
-      .writeUInt8(+this.invulnerable | +this.flying << 1 | +this.allowFlying << 2 | +this.creativeMode << 3)
-      .writeFloat(this.flyingSpeed).writeFloat(this.fov)
 
     yield new PacketWriter(0x40).writeFloat(this.xpBar).writeVarInt(this.level).writeVarInt(this.totalXp)
     yield new PacketWriter(0x41).writeFloat(this.health).writeVarInt(this.food).writeFloat(this.saturation)
@@ -1110,18 +1150,18 @@ export class Connection {
     }
   }
 
-  private mapClientboundPacket(packet: PacketReader, clientEid: number) {
+  private mapClientboundPacket(packet: PacketReader, clientEid: number): Buffer {
     packet = packet.clone()
     if ([0x6, 0x8, 0x26, 0x27, 0x28, 0x30, 0x33, 0x36, 0x39, 0x3e, 0x3f, 0x4c, 0x4e, 0x4f].includes(packet.id)) {
       // entity and player related packets
       const eid = packet.readVarInt()
       return new PacketWriter(packet.id).writeVarInt(eid == this.eid ? clientEid : eid)
-        .write(packet.buffer.slice(packet.offset))
+        .write(packet.buffer.slice(packet.offset)).encode()
     } else if (packet.id == 0x3c) {
       // entity metadata
       const entityEid = packet.readVarInt()
       const entity = this.entities.get(entityEid)
-      if (!entity || entity.objectType != 76) return packet
+      if (!entity || entity.objectType != 76) return packet.buffer
 
       const metadata = readMetadata(packet)
       metadata.forEach((entry, index) => {
@@ -1133,11 +1173,11 @@ export class Connection {
 
       const writer = new PacketWriter(packet.id, 340)
         .writeVarInt(entityEid == this.eid ? clientEid : entityEid)
-      return writeMetadata(writer, metadata)
+      return writeMetadata(writer, metadata).encode()
     } else if (packet.id == 0x1b) {
       // entity status
       const eid = packet.readInt32()
-      return new PacketWriter(packet.id).writeInt32(eid == this.eid ? clientEid : eid).writeUInt8(packet.readUInt8())
+      return new PacketWriter(packet.id).writeInt32(eid == this.eid ? clientEid : eid).writeUInt8(packet.readUInt8()).encode()
     } else if (packet.id == 0x43) {
       // set passengers
       const vehicle = packet.readVarInt(), count = packet.readVarInt()
@@ -1146,13 +1186,13 @@ export class Connection {
         const eid = packet.readVarInt()
         writer.writeVarInt(eid == this.eid ? clientEid : eid)
       }
-      return writer
+      return writer.encode()
     }
 
-    return packet
+    return packet.buffer
   }
 
-  private mapServerboundPacket(packet: PacketReader, clientEid: number) {
+  private mapServerboundPacket(packet: PacketReader, clientEid: number): Buffer {
     packet = packet.clone()
 
     if (packet.id == 0xd || packet.id == 0xe) {
@@ -1178,13 +1218,13 @@ export class Connection {
       // entity action
       const eid = packet.readVarInt(), action = packet.readVarInt()
       return new PacketWriter(0x15).writeVarInt(eid == clientEid ? this.eid : eid)
-        .writeVarInt(action).writeVarInt(packet.readVarInt())
+        .writeVarInt(action).writeVarInt(packet.readVarInt()).encode()
     } else if (packet.id == 0x1a) {
       // held item change
       this.heldItem = packet.readInt16()
     }
 
-    return packet
+    return packet.buffer
   }
 
   private getChunk(x: number, z: number) {

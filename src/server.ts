@@ -1,7 +1,7 @@
 import { Server, PacketWriter, State, ServerConnection } from "mcproto"
-import { Connection, ConnectError } from "./connection"
+import { Connection, ConnectError, connect } from "./connection"
 import * as data from "./data"
-import { StringComponent } from "mc-chat-format/lib"
+import { StringComponent } from "mc-chat-format"
 
 export function createServer(connections: Map<string, Connection>) {
   const server = new Server({
@@ -67,7 +67,7 @@ export function createServer(connections: Map<string, Connection>) {
 
       let match: RegExpMatchArray | null
 
-      if ((match = text.match(/\/connect (.+)/))) {
+      if ((match = text.match(/^\/connect (.+)/))) {
         const input = match[1]
         const profile = profiles.find(profile => profile.name == input || profile.id == input)
           || profiles.find(profile => profile.name.startsWith(input))
@@ -82,9 +82,7 @@ export function createServer(connections: Map<string, Connection>) {
         }).writeUInt8(1))
 
         if (!connections.has(profile.id)) try {
-          const connection = await Connection.connect(profile)
-          connections.set(profile.id, connection)
-          connection.client.on("end", () => connections.delete(profile!.id))
+          await connect(connections, profile)
         } catch (error) {
           return client.send(new PacketWriter(0xf).writeJSON({
             text: "", extra: [
@@ -107,6 +105,23 @@ export function createServer(connections: Map<string, Connection>) {
 
         if (unproxyLastConnection) unproxyLastConnection()
         unproxyLastConnection = await connection.proxy(client, eid, uuid.replace(/-/g, ""), true)
+      } else if ((match = text.match(/^\/disconnect (.+)/))) {
+        const input = match[1]
+        const profile = profiles.find(profile => profile.name == input || profile.id == input)
+          || profiles.find(profile => profile.name.startsWith(input))
+
+        if (!profile) return client.send(new PacketWriter(0xf).writeJSON({
+          text: "Profile not found", color: "light_purple"
+        }).writeUInt8(1))
+
+        const connection = connections.get(profile.id)
+        if (!connection) {
+          await client.send(new PacketWriter(0xf).writeJSON({
+            text: `${profile.name} is not connected`, color: "light_purple"
+          }).writeUInt8(1))
+        } else {
+          connection.disconnect()
+        }
       }
     })
 

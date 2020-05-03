@@ -7,6 +7,25 @@ import * as fs from "fs"
 import { validateOrRefreshToken } from "./utils"
 import { Profile } from "./data"
 
+export async function connect(connections: Map<string, Connection>, profile: Profile, host = "localhost", port = 25566) {
+  if (connections.has(profile.id)) throw new Error("Already connected")
+
+  const connection = new Connection(profile)
+  connections.set(profile.id, connection)
+
+  connection.client.on("end", () => {
+    connections.delete(profile.id)
+  })
+
+  await connection.connect()
+  return connection
+}
+
+export function disconnect(connections: Map<string, Connection>, profile: Profile) {
+  const connection = connections.get(profile.id)
+  if (connection) connection.disconnect()
+}
+
 export interface PlayerListItem {
   name: string
   gamemode: number
@@ -129,41 +148,6 @@ export class ConnectError extends Error {
 }
 
 export class Connection {
-  static async connect(profile: Profile, host = "localhost", port = 25566) {
-    if (!await validateOrRefreshToken(profile)) throw new Error("Failed to refresh token")
-
-    const client = await Client.connect(host, port, {
-      profile: profile.id,
-      accessToken: profile.accessToken
-    })
-
-    client.send(new PacketWriter(0x0).writeVarInt(340)
-      .writeString(host).writeUInt16(client.socket.remotePort!)
-      .writeVarInt(State.Login))
-
-    client.send(new PacketWriter(0x0).writeString(profile.name))
-
-    let disconnectReason: chat.StringComponent | undefined
-
-    const disconnectListener = client.onPacket(0x0, packet => {
-      disconnectReason = chat.convert(packet.readJSON())
-      client.end()
-    })
-
-    let packet!: PacketReader
-    try {
-      packet = await client.nextPacket(0x2, false)
-      disconnectListener.dispose()
-    } catch (error) {
-      if (disconnectReason) {
-        throw new ConnectError(disconnectReason)
-      }
-    }
-
-    return new Connection(profile.id, client,
-      packet.readString().replace(/-/g, ""), packet.readString())
-  }
-
   // Properties for state tracking
   player: Player = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }
   inventory = new Map<number, Item>()
@@ -214,6 +198,10 @@ export class Connection {
   ridingEid: number | null = null
 
   // Connection related properties
+  client: Client
+  uuid?: string
+  username?: string
+
   conn: ServerConnection | null = null
   disconnectReason?: chat.StringComponent
   userHasDisconnected = false
@@ -224,18 +212,44 @@ export class Connection {
   queue: Queue | null = null
   dumpStream?: Gzip
 
-  constructor(public id: string, public client: Client, public uuid: string, public username: string) {
-    this.client = markRaw(client)
+  constructor(public profile: Profile) {
+    this.client = markRaw(new Client({ profile: profile.id, accessToken: profile.accessToken }))
+    this.proxy = this.proxy.bind(this)
+    this.mapServerboundPacket = this.mapServerboundPacket.bind(reactive(this))
+    this.track = this.track.bind(reactive(this))
+  }
 
-    this.client.onPacket(0x1a, packet => {
-      this.disconnectReason = chat.convert(packet.readJSON())
+  async connect(host = "localhost", port = 25566) {
+    if (!await validateOrRefreshToken(this.profile)) throw new Error("Failed to refresh token")
+
+    await this.client.connect(host, port)
+
+    this.client.send(new PacketWriter(0x0).writeVarInt(340)
+      .writeString(host).writeUInt16(this.client.socket.remotePort!)
+      .writeVarInt(State.Login))
+
+    this.client.send(new PacketWriter(0x0).writeString(this.profile.name))
+
+    let disconnectReason: chat.StringComponent | undefined
+    const disconnectListener = this.client.onPacket(0x0, packet => {
+      disconnectReason = chat.convert(packet.readJSON())
       this.client.end()
     })
 
-    this.proxy = this.proxy.bind(this)
-    this.mapServerboundPacket = this.mapServerboundPacket.bind(reactive(this))
-    this.track.call(reactive(this))
+    let packet!: PacketReader
+    try {
+      packet = await this.client.nextPacket(0x2, false)
+      disconnectListener.dispose()
+    } catch (error) {
+      if (disconnectReason) throw new ConnectError(disconnectReason)
+    }
 
+    this.uuid = packet.readString().replace(/-/g, "")
+    this.username = packet.readString()
+    this.initialize()
+  }
+
+  private initialize() {
     const interval = setInterval(() => {
       if (this.dumpStream) this.dumpStream.flush()
     }, 30000)
@@ -245,6 +259,12 @@ export class Connection {
     })
 
     this.client.on("end", () => clearInterval(interval))
+    this.client.onPacket(0x1a, packet => {
+      this.disconnectReason = chat.convert(packet.readJSON())
+      this.client.end()
+    })
+
+    this.track()
     this.startDump()
   }
 
@@ -259,7 +279,7 @@ export class Connection {
 
   startDump() {
     if (!fs.existsSync("dumps")) fs.mkdirSync("dumps")
-    const file = fs.createWriteStream(`dumps/${new Date().toISOString()}.${this.id}.dump.gz`)
+    const file = fs.createWriteStream(`dumps/${new Date().toISOString()}.${this.profile.id}.dump.gz`)
     this.dumpStream = createGzip({ level: 4 })
     this.dumpStream.on("close", () => delete this.dumpStream)
     this.dumpStream.pipe(file, { end: true })
@@ -272,7 +292,7 @@ export class Connection {
 
   disconnect() {
     this.userHasDisconnected = true
-    this.client.end()
+    return this.client.end()
   }
 
   async proxy(conn: ServerConnection, eid = this.eid, uuid: string, respawn = false) {

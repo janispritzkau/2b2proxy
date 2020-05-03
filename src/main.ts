@@ -10,12 +10,12 @@ import fs = require("fs")
 import inspector = require("inspector")
 import * as chat from "mc-chat-format"
 
-import { Connection, ConnectError } from "./connection"
+import { Connection, ConnectError, connect, disconnect } from "./connection"
 import { startNotifier } from "./notifications"
 import { createServer } from "./server"
 import * as auth from "./auth"
 import * as data from "./data"
-import { effectDeep, validateOrRefreshToken, debounce } from "./utils"
+import { effectDeep, debounce } from "./utils"
 
 if (!fs.existsSync("config.json")) {
   fs.writeFileSync("config.json", JSON.stringify({
@@ -159,12 +159,10 @@ app.post("/api/profiles/:id/connect", (req, res) => {
   const profile = data.profiles.get(req.params.id)
 
   if (user.profiles.has(req.params.id) && profile) {
-    Connection.connect(profile).then(connection => {
-      connections.set(profile.id, connection)
-      connection.client.on("end", () => connections.delete(profile.id))
+    connect(connections, profile).then(() => {
       res.json({ success: true })
     }).catch(error => {
-      res.json({ success: false, reason: error instanceof ConnectError ? error.reason : null })
+      res.json({ success: false, reason: error instanceof ConnectError ? error.reason : null, error: error.message })
     })
   } else {
     res.status(400).end()
@@ -175,8 +173,7 @@ app.post("/api/profiles/:id/disconnect", (req, res) => {
   const user = res.locals.user as data.User
   let profile: data.Profile | undefined
   if (user.profiles.has(req.params.id) && (profile = data.profiles.get(req.params.id))) {
-    const connection = connections.get(profile.id)
-    if (connection) connection.disconnect()
+    disconnect(connections, profile)
     return res.end()
   } else {
     return res.status(400).end()

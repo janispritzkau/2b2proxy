@@ -89,7 +89,7 @@ function notifyDisconnect(profile: data.Profile, reason?: chat.StringComponent) 
   const notification: Notification = {
     title: `${profile.name} was disconnected`,
     body: reason && chat.format(reason),
-    tag: "disconnect",
+    tag: `disconnect-${profile.id}`,
     renotify: true
   }
 
@@ -102,7 +102,7 @@ function notifyQueue(profile: data.Profile, queuePosition: number | null) {
   const notification: Notification = {
     title: `${profile.name} is low in queue`,
     body: `Position in queue: ${queuePosition}`,
-    tag: "queue",
+    tag: `queue-${profile.id}`,
     renotify: true
   }
 

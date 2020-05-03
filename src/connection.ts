@@ -5,7 +5,8 @@ import { performance } from "perf_hooks"
 import { createGzip, Gzip } from "zlib"
 import * as fs from "fs"
 import { validateOrRefreshToken } from "./utils"
-import { Profile } from "./data"
+import { Profile, users } from "./data"
+import { sendNotification } from "./notifications"
 
 export async function connect(connections: Map<string, Connection>, profile: Profile, host = "localhost", port = 25566) {
   if (connections.has(profile.id)) throw new Error("Already connected")
@@ -15,6 +16,10 @@ export async function connect(connections: Map<string, Connection>, profile: Pro
 
   connection.client.on("end", () => {
     connections.delete(profile.id)
+    if (!connection.userHasDisconnected && profile.settings.autoReconnect.enabled) {
+      setTimeout(() => connect(connections, profile, host, port)
+        .catch(error => console.error(error)), profile.settings.autoReconnect.delay)
+    }
   })
 
   await connection.connect()
@@ -170,6 +175,7 @@ export class Connection {
   health = 20
   food = 20
   saturation = 5
+  healthInitialized = false
 
   xpBar = 0
   level = 0
@@ -265,7 +271,7 @@ export class Connection {
     })
 
     this.track()
-    this.startDump()
+    if (this.profile.settings.enablePacketDumps) this.startDump()
   }
 
   dumpPacket(buffer: Buffer, serverbound = false, time = performance.now()) {
@@ -420,12 +426,27 @@ export class Connection {
     // spawn player
     this.client.onPacket(0x5, packet => {
       const eid = packet.readVarInt()
+      const uuid = packet.read(16).toString("hex")
       this.entities.set(eid, {
-        type: "player", eid, uuid: packet.read(16).toString("hex"),
+        type: "player", eid, uuid,
         x: packet.readDouble(), y: packet.readDouble(), z: packet.readDouble(),
         yaw: packet.readInt8(), pitch: packet.readInt8(),
         metadata: readMetadata(packet)
       })
+
+      if (this.profile.settings.notifyPlayers.enabled
+        && (!this.profile.settings.notifyPlayers.disableWhilePlaying || !this.conn)) {
+        const player = this.players.get(uuid)
+        if (player && !this.profile.settings.notifyPlayers.ignore.includes(player.name)) {
+          for (const user of users.values()) {
+            if (user.profiles.has(this.profile.id)) sendNotification(user, {
+              title: `${player.name} is in range of ${this.profile.name}`,
+              tag: `player-${this.profile.id}`,
+              renotify: true
+            })
+          }
+        }
+      }
     })
 
     // update block entity
@@ -846,6 +867,14 @@ export class Connection {
       this.health = packet.readFloat()
       this.food = packet.readVarInt()
       this.saturation = packet.readFloat()
+      if (this.profile.settings.autoDisconnect.enabled
+        && (!this.profile.settings.autoDisconnect.disableWhilePlaying || !this.conn)
+        && this.health < this.profile.settings.autoDisconnect.health
+        && this.healthInitialized) {
+        this.disconnectReason = { text: "Disconnected because of low health" }
+        this.client.end()
+      }
+      this.healthInitialized = true
     })
 
     // set passengers
@@ -1010,7 +1039,7 @@ export class Connection {
     yield new PacketWriter(0x3a).writeInt8(this.heldItem)
 
     yield new PacketWriter(0x40).writeFloat(this.xpBar).writeVarInt(this.level).writeVarInt(this.totalXp)
-    yield new PacketWriter(0x41).writeFloat(this.health).writeVarInt(this.food).writeFloat(this.saturation)
+    if (this.healthInitialized) yield new PacketWriter(0x41).writeFloat(this.health).writeVarInt(this.food).writeFloat(this.saturation)
 
     if (this.playerListHeader) yield new PacketWriter(0x4a)
       .writeJSON(this.playerListHeader).writeJSON(this.playerListFooter)

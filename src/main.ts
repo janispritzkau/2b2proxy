@@ -104,7 +104,7 @@ app.get("/api/profiles", (req, res) => {
   const user = res.locals.user as data.User
   res.json([...data.profiles.values()]
     .filter(profile => user.profiles.has(profile.id))
-    .map(profile => ({ id: profile.id, name: profile.name })))
+    .map(profile => ({ id: profile.id, name: profile.name, settings: profile.settings })))
 })
 
 app.post("/api/profiles", (req, res, next) => (async () => {
@@ -115,7 +115,10 @@ app.post("/api/profiles", (req, res, next) => (async () => {
       if (typeof profile.id != "string" || typeof profile.name != "string" || typeof profile.accessToken != "string") {
         return res.status(400).end()
       }
-      data.profiles.set(profile.id, { id: profile.id, name: profile.name, accessToken: profile.accessToken })
+      data.profiles.set(profile.id, {
+        id: profile.id, name: profile.name, accessToken: profile.accessToken,
+        settings: data.defaultProfileSettings
+      })
       user.profiles.add(profile.id)
     }
   } else {
@@ -133,7 +136,8 @@ app.post("/api/profiles", (req, res, next) => (async () => {
       const json = await response.json()
       for (const profile of json.availableProfiles) {
         data.profiles.set(profile.id, {
-          id: profile.id, name: profile.name, accessToken: json.accessToken
+          id: profile.id, name: profile.name, accessToken: json.accessToken,
+          settings: data.defaultProfileSettings
         })
         user.profiles.add(profile.id)
       }
@@ -144,6 +148,14 @@ app.post("/api/profiles", (req, res, next) => (async () => {
 
   res.end()
 })().catch(next))
+
+app.put("/api/profiles/:id", (req, res) => {
+  const user = res.locals.user as data.User
+  const profile = data.profiles.get(req.params.id)
+  if (!profile || user.profiles.has(req.params.id)) return res.status(404).end()
+  profile.settings = { ...profile.settings, ...req.body.settings }
+  res.end()
+})
 
 app.delete("/api/profiles/:id", (req, res) => {
   const user = res.locals.user as data.User
@@ -216,7 +228,7 @@ wss.on("connection", (ws, req) => {
       profiles: [...user.profiles].map(id => {
         const profile = data.profiles.get(id)!
         return {
-          id, name: profile.name
+          id, name: profile.name, settings: profile.settings
         }
       })
     }))

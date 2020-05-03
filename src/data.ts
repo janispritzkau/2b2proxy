@@ -9,10 +9,29 @@ export interface User {
   profiles: Set<string>
 }
 
+export interface ProfileSettings {
+  autoReconnect: {
+    enabled: boolean
+    delay: number
+  }
+  autoDisconnect: {
+    enabled: boolean
+    disableWhilePlaying: boolean
+    health: number
+  }
+  notifyPlayers: {
+    enabled: boolean
+    disableWhilePlaying: boolean
+    ignore: string[]
+  }
+  enablePacketDumps: boolean
+}
+
 export interface Profile {
   id: string
   name: string
   accessToken: string
+  settings: ProfileSettings
 }
 
 export interface Token {
@@ -26,6 +45,24 @@ export interface PushSubscription {
   keys: any
   user: string
   created: number
+}
+
+export const defaultProfileSettings: ProfileSettings = {
+  autoReconnect: {
+    enabled: true,
+    delay: 10000
+  },
+  autoDisconnect: {
+    enabled: true,
+    disableWhilePlaying: true,
+    health: 5
+  },
+  notifyPlayers: {
+    enabled: true,
+    disableWhilePlaying: true,
+    ignore: []
+  },
+  enablePacketDumps: true
 }
 
 export const users = reactive(new Map<string, User>())
@@ -50,13 +87,23 @@ if (!fs.existsSync("data")) {
 }
 
 load<User[]>("users", data => data.forEach(user => users.set(user.name, { ...user, profiles: new Set(user.profiles) })))
-load<Profile[]>("profiles", data => data.forEach(profile => profiles.set(profile.id, profile)))
+
+load<Profile[]>("profiles", data => data.forEach(profile => {
+  profiles.set(profile.id, { ...profile, settings: { ...defaultProfileSettings, ...profile.settings } })
+}))
+
 load<Token[]>("tokens", data => data.forEach(token => tokens.set(token.token, token)))
+
 load<PushSubscription[]>("push-subscriptions", data => data.forEach(sub => pushSubscriptions.set(sub.endpoint, sub)))
 
 effect(() => save("users", [...users.values()].map(user => ({ ...user, profiles: [...user.profiles] }))), {
   scheduler: debounce(job => job(), 1000)
 })
-effect(() => save("profiles", [...profiles.values()]), { scheduler: debounce(job => job(), 1000) })
+
+effect(() => save("profiles", [...profiles.values()].map(profile => {
+  return { ...profile, settings: undefined }
+})), { scheduler: debounce(job => job(), 1000) })
+
 effect(() => save("tokens", [...tokens.values()]), { scheduler: debounce(job => job(), 1000) })
+
 effect(() => save("push-subscriptions", [...pushSubscriptions.values()]), { scheduler: debounce(job => job(), 1000) })

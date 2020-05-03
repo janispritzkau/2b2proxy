@@ -22,7 +22,12 @@ export async function connect(connections: Map<string, Connection>, profile: Pro
     }
   })
 
-  await connection.connect()
+  try {
+    await connection.connect()
+  } catch (error) {
+    connections.delete(profile.id)
+    throw error
+  }
   return connection
 }
 
@@ -248,6 +253,7 @@ export class Connection {
       disconnectListener.dispose()
     } catch (error) {
       if (disconnectReason) throw new ConnectError(disconnectReason)
+      else throw error
     }
 
     this.uuid = packet.readString().replace(/-/g, "")

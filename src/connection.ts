@@ -503,12 +503,9 @@ export class Connection {
       if (packet.readUInt8() != 0) return
       const count = packet.readUInt16()
       for (let i = 0; i < count; i++) {
-        const id = packet.readInt16()
-        if (id == -1) this.inventory.delete(i)
-        else this.inventory.set(i, {
-          id, count: packet.readInt8(), damage: packet.readInt16(),
-          tag: packet.readNBT()?.value
-        })
+        const item = readSlot(packet)
+        if (!item) this.inventory.delete(i)
+        else this.inventory.set(i, item)
       }
     })
 
@@ -516,12 +513,9 @@ export class Connection {
     this.client.onPacket(0x16, packet => {
       if (packet.readInt8() != 0) return
       const slot = packet.readInt16()
-      const id = packet.readInt16()
-      if (id == -1) this.inventory.delete(slot)
-      else this.inventory.set(slot, {
-        id, count: packet.readInt8(), damage: packet.readInt16(),
-        tag: packet.readNBT()?.value
-      })
+      const item = readSlot(packet)
+      if (!item) this.inventory.delete(slot)
+      else this.inventory.set(slot, item)
     })
 
     // TODO: 0x18 plugin channel
@@ -815,11 +809,9 @@ export class Connection {
       if (!entity) return
       if (!entity.equipment) entity.equipment = new Map()
       const slot = packet.readVarInt()
-      const id = packet.readInt16()
-      if (id == -1) entity.equipment.delete(slot)
-      else entity.equipment.set(slot, {
-        id, count: packet.readInt8(), damage: packet.readInt16(), tag: packet.readNBT().value
-      })
+      const item = readSlot(packet)
+      if (!item) entity.equipment.delete(slot)
+      else entity.equipment.set(slot, item)
     })
 
     // set experience
@@ -981,15 +973,7 @@ export class Connection {
 
     // window items
     packet = new PacketWriter(0x14).writeUInt8(0).writeInt16(46)
-    for (let i = 0; i < 46; i++) {
-      const slot = this.inventory.get(i)
-      if (slot) {
-        packet.writeInt16(slot.id).writeInt8(slot.count).writeInt16(slot.damage)
-        packet.writeNBT("", slot.tag)
-      } else {
-        packet.writeInt16(-1)
-      }
-    }
+    for (let i = 0; i < 46; i++) writeSlot(packet, this.inventory.get(i))
     yield packet
 
     for (const [id, map] of this.maps) {
@@ -1079,10 +1063,9 @@ export class Connection {
       }
 
       if (entity.equipment) {
-        for (const [slot, item] of entity.equipment) yield new PacketWriter(0x3f)
-          .writeVarInt(eid).writeVarInt(slot)
-          .writeInt16(item.id).writeInt8(item.count)
-          .writeInt16(item.damage).writeNBT("", item.tag)
+        for (const [slot, item] of entity.equipment) yield writeSlot(
+          new PacketWriter(0x3f).writeVarInt(eid).writeVarInt(slot), item
+        )
       }
     }
 
@@ -1259,14 +1242,7 @@ function readMetadata(packet: PacketReader): Metadata {
       case 2: metadata.set(index, { type, value: packet.readFloat() }); break
       case 3: metadata.set(index, { type, value: packet.readString() }); break
       case 4: metadata.set(index, { type, value: packet.readJSON() }); break
-      case 5: {
-        const id = packet.readInt16()
-        metadata.set(index, {
-          type, value: id != -1
-            ? { id, count: packet.readInt8(), damage: packet.readInt16(), nbt: packet.readNBT()?.value }
-            : null
-        })
-      }; break
+      case 5: metadata.set(index, { type, value: readSlot(packet) }); break
       case 6: metadata.set(index, { type, value: packet.readBool() }); break
       case 7: metadata.set(index, {
         type, value: {
@@ -1295,11 +1271,7 @@ function writeMetadata(packet: PacketWriter, metadata: Metadata) {
       case 2: packet.writeFloat(value); break
       case 3: packet.writeString(value); break
       case 4: packet.writeJSON(value); break
-      case 5: {
-        if (!value) { packet.writeInt16(-1); break }
-        packet.writeInt16(value.id).writeInt8(value.count).writeInt16(value.damage)
-        packet.writeNBT("", value.nbt)
-      }; break
+      case 5: writeSlot(packet, value); break
       case 6: packet.writeBool(value); break
       case 7: packet.writeFloat(value.x).writeFloat(value.y).writeFloat(value.z); break
       case 8: packet.writePosition(value); break
@@ -1312,6 +1284,18 @@ function writeMetadata(packet: PacketWriter, metadata: Metadata) {
   }
   packet.writeInt8(-1)
   return packet
+}
+
+function writeSlot(packet: PacketWriter, item?: Item | null) {
+  if (!item) return packet.writeInt16(-1)
+  return packet.writeInt16(item.id).writeInt8(item.count)
+    .writeInt16(item.damage).writeNBT("", item.tag)
+}
+
+function readSlot(packet: PacketReader): Item | null {
+  const id = packet.readInt16()
+  if (id == -1) return null
+  return { id, count: packet.readInt8(), damage: packet.readInt16(), tag: packet.readNBT().value }
 }
 
 const mod = (x: number, n: number) => ((x % n) + n) % n

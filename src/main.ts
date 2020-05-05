@@ -17,15 +17,19 @@ import * as auth from "./auth"
 import * as data from "./data"
 import { effectDeep, debounce } from "./utils"
 
+const defaultConfig = {
+  vapid: webPush.generateVAPIDKeys(),
+  inspector: false,
+  proxyPort: 25565,
+  apiPort: 4000
+}
+
 if (!fs.existsSync("config.json")) {
-  fs.writeFileSync("config.json", JSON.stringify({
-    vapid: webPush.generateVAPIDKeys(),
-    inspector: false
-  }, null, 2))
+  fs.writeFileSync("config.json", JSON.stringify(defaultConfig, null, 2))
   console.log("No config file found. Created 'config.json' with defaults")
 }
 
-const config = JSON.parse(fs.readFileSync("config.json", "utf-8"))
+const config = { ...defaultConfig, ...JSON.parse(fs.readFileSync("config.json", "utf-8")) as {} }
 
 webPush.setVapidDetails("mailto:janispritzkau@gmail.com", config.vapid.publicKey, config.vapid.privateKey)
 
@@ -33,8 +37,8 @@ const connections = reactive(new Map<string, Connection>())
 const proxyServer = createServer(connections)
 
 const app = express()
-const server = http.createServer(app)
-const wss = new WebSocket.Server({ server })
+const apiServer = http.createServer(app)
+const wss = new WebSocket.Server({ server: apiServer })
 
 app.use(cookieParser())
 app.use(express.json())
@@ -284,13 +288,13 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => effects.forEach(stop))
 })
 
-server.listen(4000)
-proxyServer.listen(25565)
+apiServer.listen(config.apiPort)
+proxyServer.listen(config.proxyPort)
 
 startNotifier(connections)
 
 // expose state for devtool inspection / hacking
-Object.assign(global, { server, connections, data })
+Object.assign(global, { apiServer, proxyServer, connections, data })
 
 if (config.inspector) {
   inspector.open()

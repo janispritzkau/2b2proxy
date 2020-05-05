@@ -8,7 +8,7 @@ import { validateOrRefreshToken } from "./utils"
 import { Profile, users } from "./data"
 import { sendNotification } from "./notifications"
 
-export async function connect(connections: Map<string, Connection>, profile: Profile, host = "localhost", port = 25566) {
+export async function connect(connections: Map<string, Connection>, profile: Profile, host = "2b2t.org", port = 25565) {
   if (connections.has(profile.id)) throw new Error("Already connected")
 
   const connection = new Connection(profile)

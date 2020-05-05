@@ -23,7 +23,8 @@ export async function connect(connections: Map<string, Connection>, profile: Pro
   })
 
   try {
-    await connection.connect()
+    if (!await validateOrRefreshToken(profile)) throw new Error("Failed to refresh token")
+    await connection.connect(host, port)
   } catch (error) {
     connections.delete(profile.id)
     throw error
@@ -230,9 +231,7 @@ export class Connection {
     this.track = this.track.bind(reactive(this))
   }
 
-  async connect(host = "localhost", port = 25566) {
-    if (!await validateOrRefreshToken(this.profile)) throw new Error("Failed to refresh token")
-
+  async connect(host: string, port?: number) {
     await this.client.connect(host, port)
 
     this.client.send(new PacketWriter(0x0).writeVarInt(340)
@@ -331,7 +330,14 @@ export class Connection {
       this.dumpPacket(buffer, true)
     })
 
-    const clientboundListener = this.client.on("packet", packet => conn.send(this.mapClientboundPacket(packet, eid)))
+    const clientboundListener = this.client.on("packet", packet => {
+      try {
+        conn.send(this.mapClientboundPacket(packet, eid))
+      } catch (error) {
+        console.error(error)
+        conn.end()
+      }
+    })
     const endListener = this.client.on("end", () => conn.end())
 
     const unproxy = () => {
@@ -800,11 +806,20 @@ export class Connection {
 
     // respawn
     this.client.onPacket(0x35, packet => {
-      this.dimension = packet.readInt32()
+      const dimension = packet.readInt32()
+
+      if (this.dimension != dimension) {
+        const playerEntity = this.entities.get(this.eid)!
+        this.chunks.clear()
+        this.maps.clear()
+        this.entities.clear()
+        this.entities.set(this.eid, playerEntity)
+      }
+
+      this.dimension = dimension
       this.difficulty = packet.readUInt8()
       this.gamemode = packet.readUInt8()
       this.levelType = packet.readString()
-      this.maps.clear()
     })
 
     // entity head look
@@ -1199,11 +1214,10 @@ export class Connection {
       // entity metadata
       const entityEid = packet.readVarInt()
       const entity = this.entities.get(entityEid)
-      if (!entity || entity.objectType != 76) return packet.buffer
-
       const metadata = readMetadata(packet)
+
       metadata.forEach((entry, index) => {
-        if (entity.objectType == 76 && index == 7 && entry.type == 1) {
+        if (entity && entity.objectType == 76 && index == 7 && entry.type == 1) {
           // entity which has used fireworks
           entry.value = entry.value == this.eid ? clientEid : entry.value
         }

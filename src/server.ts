@@ -23,7 +23,7 @@ export function createServer(connections: Map<string, Connection>) {
     // login start
     const username = (await client.nextPacket(0x0)).readString()
 
-    await client.encrypt(username, true)
+    await client.encrypt(username)
     client.setCompression(256)
 
     const profile = [...data.profiles.values()].find(profile => profile.name == username)

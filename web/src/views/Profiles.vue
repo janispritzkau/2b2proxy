@@ -21,7 +21,7 @@
         >
           <img :src="`https://crafatar.com/avatars/${profile.id}?size=64`" />
           <span>{{ profile.name }}</span>
-          <div v-if="connection && connection.reconnectIn" class="chip disconnected">Reconnect in {{ (connection.reconnectIn / 1000).toFixed(1) }}s</div>
+          <div v-if="connection && connection.reconnectIn" class="chip disconnected">Reconnecting in {{ (connection.reconnectIn / 1000).toFixed(1) }}s</div>
           <div v-else-if="!connection || !connection.connected" class="chip disconnected">Disconnected</div>
           <div v-else-if="connection.playing" class="chip playing">Playing</div>
           <div

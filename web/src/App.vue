@@ -98,8 +98,11 @@ export default {
     })
 
     fetch("/api/me").then(async res => {
+      if (res.status == 401) {
+        this.loginRequired = true
+        return
+      }
       this.user = await res.json()
-      console.log(this.user.name)
     })
   }
 }

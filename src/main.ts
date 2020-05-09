@@ -1,4 +1,4 @@
-import { reactive, effect, ReactiveEffect, stop } from "@vue/reactivity"
+import { reactive, effect, ReactiveEffect, stop, ref } from "@vue/reactivity"
 import express = require("express")
 import WebSocket = require("ws")
 import cookieParser = require("cookie-parser")
@@ -7,6 +7,7 @@ import webPush = require("web-push")
 import fetch from "node-fetch"
 import http = require("http")
 import fs = require("fs")
+import { performance } from "perf_hooks"
 import inspector = require("inspector")
 import * as chat from "mc-chat-format"
 
@@ -226,6 +227,9 @@ wss.on("connection", (ws, req) => {
   const effects = new Set<ReactiveEffect>()
   const user = data.users.get(token.user)!
 
+  let time = ref(performance.now())
+  let interval = setInterval(() => time.value = performance.now(), 10)
+
   effects.add(effect(() => {
     ws.send(JSON.stringify({
       type: "profiles",
@@ -238,13 +242,15 @@ wss.on("connection", (ws, req) => {
     }))
   }))
 
-  effects.add(effectDeep(track => connections.forEach((connection, id) => track(id, () => {
+  effects.add(effectDeep(track => connections.forEach((connection, id) => track(connection, () => {
     const eff = effect(() => {
       ws.send(JSON.stringify({
         type: "connections",
         connections: {
           [id]: {
             id,
+            connected: connection.connected,
+            reconnectIn: Math.max(connection.reconnectAt - time.value, 0),
             queue: connection.queue,
             playing: connection.conn != null,
             player: connection.player,
@@ -253,7 +259,7 @@ wss.on("connection", (ws, req) => {
         }
       }))
     }, {
-      scheduler: debounce(job => job(), 500),
+      scheduler: debounce(job => job(), 100),
       onStop() {
         ws.send(JSON.stringify({
           type: "connections",
@@ -285,7 +291,10 @@ wss.on("connection", (ws, req) => {
     }
   })
 
-  ws.on("close", () => effects.forEach(stop))
+  ws.on("close", () => {
+    effects.forEach(stop)
+    clearInterval(interval)
+  })
 })
 
 apiServer.listen(config.apiPort)

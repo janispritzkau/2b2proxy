@@ -9,16 +9,20 @@ import { Profile, users } from "./data"
 import { sendNotification } from "./notifications"
 
 export async function connect(connections: Map<string, Connection>, profile: Profile, host = "2b2t.org", port = 25565) {
-  if (connections.has(profile.id)) throw new Error("Already connected")
+  let connection = connections.get(profile.id)!
+  if (connection && !connection.closed) throw new Error("Connection already exists")
+  disconnect(connections, profile)
 
-  const connection = new Connection(profile)
+  connection = new Connection(profile)
   connections.set(profile.id, connection)
 
   connection.client.on("end", () => {
-    connections.delete(profile.id)
     if (!connection.userHasDisconnected && profile.settings.autoReconnect.enabled) {
-      setTimeout(() => connect(connections, profile, host, port)
+      connection.reconnectAt = performance.now() + profile.settings.autoReconnect.delay
+      connection.reconnectTimeout = setTimeout(() => connect(connections, profile, host, port)
         .catch(error => console.error(error)), profile.settings.autoReconnect.delay)
+    } else {
+      connections.delete(profile.id)
     }
   })
 
@@ -34,7 +38,16 @@ export async function connect(connections: Map<string, Connection>, profile: Pro
 
 export function disconnect(connections: Map<string, Connection>, profile: Profile) {
   const connection = connections.get(profile.id)
-  if (connection) connection.disconnect()
+  if (connection) {
+    connection.disconnect()
+    if (connection.reconnectTimeout) clearTimeout(connection.reconnectTimeout)
+  }
+}
+
+export class ConnectError extends Error {
+  constructor(public reason: chat.StringComponent) {
+    super(`Failed to connect: ${chat.format(reason)}`)
+  }
 }
 
 export interface PlayerListItem {
@@ -152,12 +165,6 @@ export interface Queue {
   time: string
 }
 
-export class ConnectError extends Error {
-  constructor(public reason: chat.StringComponent) {
-    super(`Failed to connect: ${chat.format(reason)}`)
-  }
-}
-
 export class Connection {
   // Properties for state tracking
   player: Player = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }
@@ -211,6 +218,11 @@ export class Connection {
 
   // Connection related properties
   client: Client
+  connected = false
+  closed = false
+  reconnectTimeout?: NodeJS.Timer
+  reconnectAt = 0
+
   uuid?: string
   username?: string
 
@@ -229,6 +241,12 @@ export class Connection {
     this.proxy = this.proxy.bind(this)
     this.mapServerboundPacket = this.mapServerboundPacket.bind(reactive(this))
     this.track = this.track.bind(reactive(this))
+    this.connect = this.connect.bind(reactive(this))
+
+    this.client.on("end", () => {
+      reactive(this).connected = false
+      reactive(this).closed = true
+    })
   }
 
   async connect(host: string, port?: number) {
@@ -258,25 +276,29 @@ export class Connection {
     this.uuid = packet.readString().replace(/-/g, "")
     this.username = packet.readString()
     this.initialize()
+    this.connected = true
   }
 
   private initialize() {
-    const interval = setInterval(() => {
-      if (this.dumpStream) this.dumpStream.flush()
-    }, 30000)
+    this.track()
 
-    this.client.on("packet", packet => {
-      if (packet.id != 0x1f) this.dumpPacket(packet.buffer, false)
-    })
-
-    this.client.on("end", () => clearInterval(interval))
     this.client.onPacket(0x1a, packet => {
       this.disconnectReason = chat.convert(packet.readJSON())
       this.client.end()
     })
 
-    this.track()
-    if (this.profile.settings.enablePacketDumps) this.startDump()
+    if (this.profile.settings.enablePacketDumps) {
+      this.client.on("packet", packet => {
+        if (packet.id != 0x1f) this.dumpPacket(packet.buffer, false)
+      })
+
+      const interval = setInterval(() => {
+        if (this.dumpStream) this.dumpStream.flush()
+      }, 30000)
+
+      this.client.on("end", () => clearInterval(interval))
+      this.startDump()
+    }
   }
 
   dumpPacket(buffer: Buffer, serverbound = false, time = performance.now()) {
@@ -307,8 +329,9 @@ export class Connection {
   }
 
   async proxy(conn: ServerConnection, eid = this.eid, uuid: string, respawn = false) {
+    if (!this.connected) throw new Error("Not connected")
     if (this.conn) throw new Error("Already proxied")
-    reactive(this).conn = conn
+    reactive(this).conn = markRaw(conn)
 
     if (this.eid == -1) await this.client.nextPacket(0x23, false)
     if (eid == -1) eid = this.eid
@@ -359,12 +382,18 @@ export class Connection {
   private track() {
     // chat message
     this.client.onPacket(0xf, packet => {
-      const message = packet.readJSON()
+      const message = chat.convert(packet.readJSON())
+      const text = chat.format(message)
       const position = packet.readUInt8()
       if (position != 0 && position != 1) return
 
-      if (this.queue && chat.format(message).includes("Connecting to the server")) {
+      let match: RegExpMatchArray | null
+
+      if (this.queue && text.includes("Connecting to the server")) {
         this.queue = null
+      } else if ((match = text.match(/Position in queue: (\d+)/))) {
+        if (!this.queue) this.queue = { position: +match[1], time: "None" }
+        else this.queue.position = +match[1]
       }
 
       this.chatListeners.forEach(handler => handler(message))
@@ -378,13 +407,14 @@ export class Connection {
     // player list header and footer
     this.client.onPacket(0x4a, packet => {
       const text = chat.format(packet.readJSON())
-      const match = text.match(/queue: (\d*).+time: ([^\n]+)/s)
+      const match = text.match(/queue: (\d+).+time: ([^\n]+)/s)
       if (match) {
+        const position = +match[1], time = match[2]
         if (!this.queue) {
-          this.queue = { position: +match[1], time: match[2] }
+          this.queue = { position, time }
         } else {
-          this.queue.position = +match[1]
-          this.queue.time = match[2]
+          if (position != 0) this.queue.position = position
+          this.queue.time = time
         }
       }
     })

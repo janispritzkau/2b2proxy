@@ -81,8 +81,9 @@ export function createServer(connections: Map<string, Connection>) {
           color: "light_purple"
         }).writeUInt8(1))
 
-        if (!connections.has(profile.id)) try {
-          await connect(connections, profile)
+        let connection = connections.get(profile.id)!
+        if (!connection) try {
+          connection = await connect(connections, profile)
         } catch (error) {
           return client.send(new PacketWriter(0xf).writeJSON({
             text: "", extra: [
@@ -91,8 +92,6 @@ export function createServer(connections: Map<string, Connection>) {
             ]
           }).writeUInt8(1))
         }
-
-        const connection = connections.get(profile.id)!
 
         if (connection.conn) {
           return client.send(new PacketWriter(0xf).writeJSON({
@@ -128,11 +127,12 @@ export function createServer(connections: Map<string, Connection>) {
     const sendProfilesMessage = () => {
       const lines: StringComponent[] = profiles.map(profile => {
         const connection = connections.get(profile.id)
+        const connected = !!connection?.connected
         const queue = connection?.queue
 
         return {
           text: `\n${profile.name}, `, extra: [
-            { text: connection ? "Connected" : "Disconnected", color: connection ? "green" : "gray" },
+            { text: connected ? "Connected" : "Disconnected", color: connected ? "green" : "gray" },
             {
               text: queue ? `\n- Position in queue: ${queue.position}, est. time: ${queue.time}` : "",
               color: "gray"

@@ -15,14 +15,16 @@ export default new Vue({
       return this.profiles.find(profile => profile.id == this.selectedProfile)
     },
     connection() {
-      return this.connections[this.selectedProfile]
+      const connection = this.connections[this.selectedProfile]
+      if (!connection || !connection.connected) return null
+      return connection
     }
   },
   methods: {
     async connect() {
       const res = await fetch(`/api/profiles/${this.currentProfile.id}/connect`, { method: "POST" })
       const json = await res.json()
-      if (!json.success) console.error(json.reason)
+      if (!json.success) console.error(json.reason || json.error)
     },
     async disconnect() {
       await fetch(`/api/profiles/${this.currentProfile.id}/disconnect`, { method: "POST" })

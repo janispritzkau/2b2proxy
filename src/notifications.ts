@@ -36,9 +36,9 @@ export function startNotifier(connections: Map<string, Connection>) {
 
       const interval = intervals.get(user.name)
       if (connectionsInQueue.length > 0 && !interval) {
-        intervals.set(user.name, setTimeout(() => {
+        intervals.set(user.name, setInterval(() => {
           notifyConnections(user, connectionsInQueue)
-        }, 600000 / 1000))
+        }, 600000))
       } else if (connectionsInQueue.length == 0 && interval) {
         intervals.delete(user.name)
         clearInterval(interval)
@@ -50,7 +50,7 @@ export function startNotifier(connections: Map<string, Connection>) {
     })
   })
 
-  effectDeep(track => connections.forEach((connection, id) => track(id, () => {
+  effectDeep(track => connections.forEach((connection, id) => connection.connected && track(connection, () => {
     const profile = data.profiles.get(id)!
     let lastQueuePos = 0
 

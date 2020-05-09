@@ -103,35 +103,31 @@ export default {
         return
       }
       this.user = await res.json()
-    })
-  }
-}
+      if ("Notification" in window && navigator.serviceWorker) {
+        navigator.serviceWorker.register("service-worker.js").then(async registration => {
+          let subscription = await registration.pushManager.getSubscription()
 
-function subscribe() {
+          if (!subscription) {
+            const response = await fetch("/api/push/server-key")
+            const { serverKey } = await response.json()
 
-  if ("Notification" in window && navigator.serviceWorker) {
-    navigator.serviceWorker.register("service-worker.js").then(async registration => {
-      let subscription = await registration.pushManager.getSubscription()
+            subscription = await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: serverKey
+            })
+          }
 
-      if (!subscription) {
-        const response = await fetch("/api/push/server-key")
-        const { serverKey } = await response.json()
-
-        subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: serverKey
+          fetch("/api/push/subscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(subscription)
+          })
         })
       }
-
-      fetch("/api/push/subscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(subscription)
-      })
     })
   }
-
 }
+
 </script>
 
 <style scoped>

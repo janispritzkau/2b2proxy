@@ -6,7 +6,6 @@ import cookie = require("cookie")
 import webPush = require("web-push")
 import fetch from "node-fetch"
 import http = require("http")
-import fs = require("fs")
 import { performance } from "perf_hooks"
 import inspector = require("inspector")
 import * as chat from "mc-chat-format"
@@ -16,21 +15,8 @@ import { startNotifier } from "./notifications"
 import { createServer } from "./server"
 import * as auth from "./auth"
 import * as data from "./data"
+import config from "./config"
 import { effectDeep, debounce } from "./utils"
-
-const defaultConfig = {
-  vapid: webPush.generateVAPIDKeys(),
-  inspector: false,
-  proxyPort: 25565,
-  apiPort: 4000
-}
-
-if (!fs.existsSync("config.json")) {
-  fs.writeFileSync("config.json", JSON.stringify(defaultConfig, null, 2))
-  console.log("No config file found. Created 'config.json' with defaults")
-}
-
-const config = { ...defaultConfig, ...JSON.parse(fs.readFileSync("config.json", "utf-8")) as {} }
 
 webPush.setVapidDetails("mailto:janispritzkau@gmail.com", config.vapid.publicKey, config.vapid.privateKey)
 
@@ -133,6 +119,7 @@ app.post("/api/profiles", (req, res, next) => (async () => {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         agent: { name: "Minecraft", version: 1 },
+        clientToken: config.clientToken,
         username, password
       })
     })

@@ -1,6 +1,7 @@
 import { ReactiveEffect, ReactiveEffectOptions, effect, stop } from "@vue/reactivity"
 import { Profile } from "./data"
 import fetch from "node-fetch"
+import config from "./config"
 
 export function debounce<A extends any[]>(callback: (...args: A) => any, wait = 500, maxWait = wait) {
   let last = Date.now()
@@ -46,13 +47,13 @@ export function effectDeep(fn: (track: EffectDeepTrackFn) => void, options?: Rea
 export async function validateOrRefreshToken(profile: Profile): Promise<boolean> {
   let response = await fetch("https://authserver.mojang.com/validate", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accessToken: profile.accessToken })
+    body: JSON.stringify({ clientToken: config.clientToken, accessToken: profile.accessToken })
   })
 
   if (!response.ok) {
     response = await fetch("https://authserver.mojang.com/refresh", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessToken: profile.accessToken })
+      body: JSON.stringify({ clientToken: config.clientToken, accessToken: profile.accessToken })
     })
 
     if (response.ok) {

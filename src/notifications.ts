@@ -17,7 +17,9 @@ export async function sendNotification(user: data.User, notification: Notificati
   for (const subscription of data.pushSubscriptions.values()) {
     if (subscription.user != user.name) continue
     try {
-      await webPush.sendNotification(subscription, JSON.stringify(notification))
+      await webPush.sendNotification(subscription, JSON.stringify(notification), {
+        TTL: 3600 // keep push messages for 1 hour
+      })
     } catch (error) {
       if (error instanceof webPush.WebPushError && error.statusCode == 410) {
         data.pushSubscriptions.delete(subscription.endpoint)

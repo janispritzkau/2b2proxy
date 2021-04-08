@@ -309,7 +309,7 @@ export class Connection {
   startDump() {
     if (!fs.existsSync("dumps")) fs.mkdirSync("dumps")
     const file = fs.createWriteStream(`dumps/${new Date().toISOString()}.${this.profile.id}.dump.gz`)
-    this.dumpStream = createGzip({ level: 4 })
+    this.dumpStream = markRaw(createGzip({ level: 4 }))
     this.dumpStream.on("close", () => delete this.dumpStream)
     this.dumpStream.pipe(file, { end: true })
   }
